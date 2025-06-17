@@ -1,603 +1,625 @@
 import streamlit as st
 import pandas as pd
-import numpy as np
 import plotly.graph_objects as go
-import plotly.express as px
-from datetime import datetime, timedelta
-import time
-import calendar
+from plotly.subplots import make_subplots
+import numpy as np
+from datetime import datetime, date
+import os
 
+# Global variable to store gas prices
+gas_prices_df = None
 
-st.set_page_config(
-    page_title="Electrolyzer Trading Dashboard",
-    layout="wide"
-)
-
-# Initialize session state
-if 'simulation_running' not in st.session_state:
-    st.session_state.simulation_running = False
-if 'total_profit' not in st.session_state:
-    st.session_state.total_profit = 125680
-
-def generate_price_data(hours=24, current_time=None):
-    """Generate dummy electricity price data"""
-    if current_time is None:
-        current_time = datetime.now()
-    
-    data = []
-    for i in range(hours):
-        time_point = current_time - timedelta(hours=hours-i-1)
-        # Create realistic price pattern with some volatility
-        base_price = 52 + np.sin(i * 0.3) * 8 + np.random.normal(0, 3)
-        price = max(20, base_price)  # Ensure price doesn't go negative
-        
-        data.append({
-            'timestamp': time_point,
-            'price': round(price, 2),
-            'hour': time_point.hour
-        })
-    
-    return pd.DataFrame(data)
-
-def calculate_strategy_decision(price, buy_threshold, sell_threshold):
-    """Determine what action to take based on current price"""
-    if price < buy_threshold:
-        return "ELECTROLYZER", "Convert to Energy Storage (0.7 efficiency)"
-    elif price <= sell_threshold:
-        return "HOLD", "Hold Position"
-    else:
-        return "SELL", "Sell Power"
-
-def simulate_trading_performance(df, buy_threshold, sell_threshold, electrolyzer_capacity):
-    """Simulate position-based trading performance with simplified electrolyzer logic"""
-    df_copy = df.copy()
-    
-    # Initialize state variables
-    position_open = False
-    buy_price = 0
-    actions = []
-    profits = []
-    energy_converted = []
-    
-    for i, row in df_copy.iterrows():
-        current_price = row['price']
-        
-        if not position_open:
-            # WAIT STATE - No position open
-            if current_price <= buy_threshold:
-                # Price <= Buy Threshold → Enter BUY STATE
-                position_open = True
-                buy_price = current_price
-                action = "BUY"
-                profit = 0
-                energy_mwh = 0
-            else:
-                # Price > Buy Threshold → Stay in WAIT STATE
-                action = "WAIT"
-                profit = 0
-                energy_mwh = 0
-        else:
-            # Position is open - check exit conditions
-            if current_price >= sell_threshold:
-                # Price >= Sell Threshold → SELL STATE
-                profit = (current_price - buy_price) * electrolyzer_capacity
-                position_open = False
-                buy_price = 0
-                action = "SELL"
-                energy_mwh = 0
-            elif current_price < buy_price:
-                # Price < Entry Price → ELECTROLYZER STATE (forced exit)
-                # Convert electricity to energy storage with 0.7 efficiency
-                energy_input = electrolyzer_capacity  # MWh input
-                energy_output = energy_input * 0.7    # MWh output (70% efficiency)
-                
-                # Calculate the effective profit/loss
-                # We lose 30% of the energy, but we paid buy_price and avoid current lower price
-                electricity_cost = buy_price * electrolyzer_capacity
-                energy_value = energy_output * current_price  # Value of stored energy at current price
-                
-                # The "profit" is avoiding the loss vs selling at current price
-                # Plus we have 0.7 MWh of stored energy worth current_price per MWh
-                profit = max(0, energy_value - electricity_cost)
-                
-                position_open = False
-                buy_price = 0
-                action = "ELECTROLYZER"
-                energy_mwh = energy_output
-            else:
-                # Entry Price <= Price < Sell Threshold → HOLD/BUY STATE (continue holding)
-                action = "HOLD"
-                profit = 0
-                energy_mwh = 0
-        
-        actions.append(action)
-        profits.append(max(0, profit))
-        energy_converted.append(energy_mwh)
-    
-    df_copy['action'] = actions
-    df_copy['profit'] = profits
-    df_copy['energy_stored_mwh'] = energy_converted
-    df_copy['position_open'] = [action in ['BUY', 'HOLD'] for action in actions]
-    df_copy['buy_price'] = [buy_price if pos_open else 0 for pos_open in df_copy['position_open']]
-    
-    return df_copy
-
-def load_data_from_file(uploaded_file):
-    """Load and process uploaded CSV file"""
+def load_gas_prices():
+    global gas_prices_df
     try:
-        # Try to read the CSV file with different delimiters
+        gas_path = "C:/Users/Z_LAME/Desktop/Crawler/Electrolyser/gas_streamlit.csv"
+        if os.path.exists(gas_path):
+            gas_prices_df = pd.read_csv(gas_path)
+            gas_prices_df = gas_prices_df.set_index('Date')
+            # Convert gas prices index to datetime
+            gas_prices_df.index = pd.to_datetime(gas_prices_df.index)
+            st.success(f"Gas prices loaded successfully: {len(gas_prices_df)} records")
+            return True
+        else:
+            st.error(f"Gas prices file not found at: {gas_path}")
+            return False
+    except Exception as e:
+        st.error(f"Error loading gas prices: {str(e)}")
+        return False
+
+def preprocess_with_gas_prices(df):
+    """
+    Preprocess uploaded data by merging with gas prices
+    Expected: df must contain a column named 'Delivery day'
+    """
+    global gas_prices_df
+        
+    # Preprocess the uploaded data - following your working prototype
+    processed_df = df.copy()
+    processed_df = processed_df.set_index('Delivery day')
+    processed_df.index.name = 'Date'
+    processed_df = processed_df.sort_index()
+    
+    # Convert index to datetime (this was the main issue in your original code)
+    processed_df.index = pd.to_datetime(processed_df.index, dayfirst=True)
+    
+    # Merge with gas prices
+    try:
+        merged = pd.merge(processed_df, gas_prices_df, how="inner", on="Date")
+    except Exception as e:
+        st.error(f"Merge error: {str(e)}")
+        return pd.DataFrame()  # Return empty DataFrame on error
+    
+    # Rename Hour 3A to Hour 3 if it exists
+    if 'Hour 3A' in merged.columns:
+        merged = merged.rename(columns={'Hour 3A': 'Hour 3'})
+    
+    # Reshape the data - using your working prototype logic
+    hour_columns = [f'Hour {i}' for i in range(1, 25)]
+    # Filter to only existing columns
+    hour_columns = [col for col in hour_columns if col in merged.columns]
+    
+    if not hour_columns:
+        # If no hour columns found, assume it's already in the right format
+        st.warning("No hour columns found for reshaping. Using data as-is.")
+        return merged
+    
+    # Reset index for melting
+    merged_reset = merged.reset_index()
+    
+    reshaped_df = pd.melt(
+        merged_reset, 
+        id_vars=['Date', 'Settlement'],
+        value_vars=hour_columns,
+        var_name='Hour',
+        value_name='Price'
+    )
+    
+    # Extract hour number and sort
+    reshaped_df['Hour_num'] = reshaped_df['Hour'].str.extract('(\d+)').astype(int)
+    reshaped_df = reshaped_df.sort_values(['Date', 'Hour_num'])
+    reshaped_df = reshaped_df.drop('Hour_num', axis=1)
+    reshaped_df = reshaped_df.set_index('Date')
+    
+    return reshaped_df
+
+def spot(df, price_col, settlement_col, efficiency_parameter, certificates, time_interval_minutes):
+    result_df = df.copy()
+    result_df['operate'] = False
+    result_df['profit'] = 0.0
+    result_df['buy_threshold'] = None
+    
+    time_factor = time_interval_minutes / 60.0  
+    missing_gas_prices = 0
+    
+    for idx, row in result_df.iterrows():
         try:
-            df = pd.read_csv(uploaded_file, delimiter=';')
-        except:
-            # If semicolon doesn't work, try comma delimiter
-            uploaded_file.seek(0)  # Reset file pointer
-            df = pd.read_csv(uploaded_file)
-        
-        # Check if we have the required columns
-        if 'timestamp' not in df.columns or 'price' not in df.columns:
-            # Try to auto-detect columns - assume first column is timestamp, second is price
-            if len(df.columns) >= 2:
-                df.columns = ['timestamp', 'price'] + list(df.columns[2:])
-                st.sidebar.info("Auto-detected columns: first as 'timestamp', second as 'price'")
-            else:
-                st.sidebar.error("CSV must contain at least 2 columns (timestamp and price)")
-                return None
-        
-        # Convert timestamp column to datetime with multiple format attempts
-        timestamp_formats = [
-            # Try common date formats
-            None,  # Let pandas infer the format
+            gas_price = row[settlement_col]
+            
+            if pd.isna(gas_price):
+                missing_gas_prices += 1
+                continue
+            
+            buy_threshold = efficiency_parameter * (certificates + gas_price)
+            price = row[price_col]  
+            el_profit = efficiency_parameter * (certificates + gas_price) - price
+            
+            result_df.at[idx, 'buy_threshold'] = buy_threshold
+            
+            if el_profit > 0:
+                result_df.at[idx, 'operate'] = True
+                result_df.at[idx, 'profit'] = el_profit * time_factor
+                
+        except (KeyError, TypeError) as e:
+            missing_gas_prices += 1
+    
+    if missing_gas_prices > 0:
+        st.warning(f"Missing or invalid gas prices for {missing_gas_prices} rows")
+    
+    total_operating_hours = result_df['operate'].sum() * time_factor
+    total_profit = result_df['profit'].sum()
+    
+    return result_df, total_operating_hours, total_profit
+
+def parse_date_column(df, date_col):
+    """Try to parse date column with multiple formats"""
+    try:
+        # Try common date formats
+        date_formats = [
             '%Y-%m-%d %H:%M:%S',
-            '%d.%m.%Y %H:%M',
+            '%Y-%m-%d %H:%M',
+            '%d/%m/%Y %H:%M:%S',
+            '%d/%m/%Y %H:%M',
             '%m/%d/%Y %H:%M:%S',
-            '%Y-%m-%dT%H:%M:%S',
-            '%d-%m-%Y %H:%M',
-            '%Y%m%d%H%M',
+            '%m/%d/%Y %H:%M',
             '%Y-%m-%d',
-            '%d.%m.%Y',
+            '%d/%m/%Y',
             '%m/%d/%Y'
         ]
         
-        success = False
-        for date_format in timestamp_formats:
+        for fmt in date_formats:
             try:
-                if date_format is None:
-                    df['timestamp'] = pd.to_datetime(df['timestamp'], infer_datetime_format=True)
-                else:
-                    df['timestamp'] = pd.to_datetime(df['timestamp'], format=date_format)
-                success = True
-                st.sidebar.success(f"Successfully parsed timestamps")
-                break
+                return pd.to_datetime(df[date_col], format=fmt)
             except:
                 continue
         
-        if not success:
-            # Show sample of problematic data to help user
-            sample_timestamps = df['timestamp'].head(3).tolist()
-            st.sidebar.error(f"Could not parse timestamp column. Examples of your data: {sample_timestamps}")
-            st.sidebar.info("Try reformatting your dates to YYYY-MM-DD HH:MM:SS format")
-            return None
-        
-        # Ensure price is numeric
-        try:
-            # Replace comma with dot for numeric values (European format)
-            if df['price'].dtype == object:  # If price is string
-                df['price'] = df['price'].str.replace(',', '.').astype(float)
-            else:
-                df['price'] = pd.to_numeric(df['price'], errors='coerce')
-            
-            # Drop rows with invalid prices
-            invalid_count = df['price'].isna().sum()
-            if invalid_count > 0:
-                st.sidebar.warning(f"Removed {invalid_count} rows with invalid price values")
-                df = df.dropna(subset=['price'])
-        except:
-            st.sidebar.error("Could not parse price column. Please ensure it contains numeric values.")
-            return None
-        
-        # Add hour column for analysis
-        df['hour'] = df['timestamp'].dt.hour
-        
-        # Sort by timestamp
-        df = df.sort_values('timestamp').reset_index(drop=True)
-        
-        return df
-        
+        return pd.to_datetime(df[date_col])
+    
     except Exception as e:
-        st.sidebar.error(f"Error loading file: {str(e)}")
-        st.sidebar.info("Please check your file format and try again")
+        st.error(f"Could not parse date column: {str(e)}")
         return None
+
+def create_visualization(df_result, price_col, time_interval_minutes):
+    """Create a visualization showing price data and operating decisions"""
     
-
+    fig = make_subplots(specs=[[{"secondary_y": True}]])
     
-# Main Dashboard
-st.title("Electrolyzer Trading Strategy Dashboard")
-st.markdown("Real-time simulation of power trading with energy storage optimization (70% efficiency)")
-
-# Sidebar for controls
-st.sidebar.header("Strategy Parameters")
-
-# Trading thresholds
-buy_threshold = st.sidebar.number_input("Buy Threshold (€/MWh)", min_value=0.0, max_value=2000.0, value=50.0, step=1.0)
-
-# Sell threshold options
-sell_threshold_mode = st.sidebar.radio(
-    "Sell Threshold Mode",
-    ["Absolute Value", "Percentage Above Buy Threshold"],
-    help="Choose how to set the sell threshold"
-)
-
-if sell_threshold_mode == "Absolute Value":
-    sell_threshold = st.sidebar.number_input(
-        "Sell Threshold (€/MWh)", 
-        min_value=0.0, 
-        max_value=2000.0, 
-        value=55.0, 
-        step=1.0
+    # Add price line
+    fig.add_trace(
+        go.Scatter(
+            x=df_result.index,
+            y=df_result[price_col],
+            mode='lines',
+            name='Electricity Price',
+            line=dict(color='blue', width=2)
+        ),
+        secondary_y=False,
     )
-else:
-    sell_percentage = st.sidebar.number_input(
-        "Sell Threshold (% above Buy Threshold)", 
-        min_value=0.1, 
-        max_value=100.0, 
-        value=10.0, 
-        step=0.1,
-        help="Percentage above buy threshold (e.g., 10% means sell at 110% of buy price)"
+    
+    # Add buy threshold line
+    fig.add_trace(
+        go.Scatter(
+            x=df_result.index,
+            y=df_result['buy_threshold'],
+            mode='lines',
+            name='Buy Threshold',
+            line=dict(color='red', width=1, dash='dash')
+        ),
+        secondary_y=False,
     )
-    sell_threshold = buy_threshold * (1 + sell_percentage / 100)
-    st.sidebar.info(f"Calculated Sell Threshold: €{sell_threshold:.2f}/MWh")
+    
+    # Add operating points
+    operating_points = df_result[df_result['operate'] == True]
+    if not operating_points.empty:
+        fig.add_trace(
+            go.Scatter(
+                x=operating_points.index,
+                y=operating_points[price_col],
+                mode='markers',
+                name='Operating Hours',
+                marker=dict(
+                    color='green',
+                    size=8,
+                    symbol='circle'
+                ),
+                text=[f"Profit: €{profit:.2f} ({time_interval_minutes}min)" for profit in operating_points['profit']],
+                hovertemplate="<b>Operating Period</b><br>" +
+                            "Price: %{y:.2f}<br>" +
+                            "%{text}<br>" +
+                            "<extra></extra>"
+            ),
+            secondary_y=False,
+        )
+    
+    # Update layout
+    fig.update_layout(
+        title=f"Electrolyser Operation Strategy ({time_interval_minutes}-minute intervals)",
+        xaxis_title="Time Period",
+        height=600,
+        hovermode='x unified'
+    )
+    
+    # Set y-axes titles
+    fig.update_yaxes(title_text="Price (€/MWh)", secondary_y=False)
+    
+    return fig
 
-# Electrolyzer parameters
-electrolyzer_capacity = st.sidebar.number_input("Power Capacity (MW)", min_value=1, max_value=168, value=10, step=1)
-
-# Validation
-if sell_threshold <= buy_threshold:
-    st.sidebar.warning("Sell threshold should be higher than buy threshold!")
-
-# Add efficiency info
-st.sidebar.info("⚡ Energy Conversion: 1 MWh input → 0.7 MWh stored energy")
-
-# Data Upload Section
-st.sidebar.header("Data Upload")
-uploaded_file = st.sidebar.file_uploader(
-    "Upload electricity price data (CSV)", 
-    type=['csv'],
-    help="CSV should contain 'timestamp' and 'price' columns. If columns have different names, the first column will be treated as timestamp and second as price."
-)
-
-# Sample CSV format info
-with st.sidebar.expander("Expected CSV Format"):
-    st.text("""
-Required columns:
-- timestamp: Date/time (various formats supported)
-- price: Electricity price (numeric)
-
-Example:
-timestamp,price
-2024-01-01 00:00:00,45.2
-2024-01-01 01:00:00,42.8
-2024-01-01 02:00:00,38.5
-...
-    """)
-
-# Load data
-df = None
-if uploaded_file is not None:
-    df = load_data_from_file(uploaded_file)
-    if df is not None:
-        st.sidebar.success(f"Loaded {len(df):,} data points")
-        st.sidebar.info(f"Period: {df['timestamp'].min().strftime('%Y-%m-%d')} to {df['timestamp'].max().strftime('%Y-%m-%d')}")
+# Streamlit App
+def main():
+    st.set_page_config(
+        page_title="Electrolyser Energy Trading Dashboard",
+        page_icon="⚡",
+        layout="wide"
+    )
+    
+    st.title("Electrolyser Energy Trading Simulation")
+    st.markdown("Upload your data and configure parameters to simulate electrolyser operations on the energy market.")
+    
+    # Load gas prices at startup
+    with st.spinner("Loading gas prices..."):
+        gas_loaded = load_gas_prices()
+    
+    if not gas_loaded:
+        st.error("Cannot proceed without gas prices. Please check the gas prices file.")
+        return
+    
+    # Show gas prices info
+    with st.expander("Gas Prices Information"):
+        global gas_prices_df
+        st.write(f"**Gas prices loaded:** {len(gas_prices_df)} records")
+        st.write(f"**Date range:** {gas_prices_df.index.min()} to {gas_prices_df.index.max()}")
+        st.write(f"**Columns:** {', '.join(gas_prices_df.columns.tolist())}")
+        st.write("**Preview:**")
+        st.dataframe(gas_prices_df.head())
+    
+    # Sidebar for parameters
+    with st.sidebar:
+        st.header("Configuration")
         
-        # Backtesting period selection
-        st.sidebar.header("Backtesting Period")
-        
-        min_date = df['timestamp'].min().date()
-        max_date = df['timestamp'].max().date()
-        
-        date_range = st.sidebar.date_input(
-            "Select date range",
-            value=(min_date, max_date),
-            min_value=min_date,
-            max_value=max_date
+        # File upload
+        uploaded_file = st.file_uploader(
+            "Upload CSV Data",
+            type=['csv'],
+            help="Upload a CSV file containing a 'Delivery day' column and hourly price data"
         )
         
-        # Filter data based on selected period
-        if len(date_range) == 2:
-            start_date, end_date = date_range
-            mask = (df['timestamp'].dt.date >= start_date) & (df['timestamp'].dt.date <= end_date)
-            df_filtered = df[mask].copy()
+        # Parameters
+        efficiency_parameter = st.number_input(
+            "Efficiency Parameter",
+            min_value=0.0,
+            max_value=2.0,
+            value=0.7,
+            step=0.01,
+            help="Electrolyser efficiency parameter (typically 0.6-0.8)"
+        )
+        
+        certificates = st.number_input(
+            "Certificates (€/MWh)",
+            min_value=0.0,
+            value=50.0,
+            step=1.0,
+            help="Certificate price in €/MWh"
+        )
+        
+        # Time interval selection
+        st.subheader("Time Resolution")
+        time_interval = st.selectbox(
+            "Data Time Interval",
+            options=[15, 30, 60],
+            index=2,  # Default to 60 minutes
+            help="Time interval of your data in minutes"
+        )
+        
+        if time_interval != 60:
+            st.info(f"Profit will be adjusted for {time_interval}-minute intervals")
+    
+    # Main content
+    if uploaded_file is not None:
+        try:
+            # Load and preprocess data
+            with st.spinner("Loading and preprocessing data..."):
+                df_raw = pd.read_csv(uploaded_file)
+                
+                # Check for required column
+                if 'Delivery day' not in df_raw.columns:
+                    st.error("⚠️ The uploaded CSV file must contain a column named 'Delivery day'")
+                    st.info("Please ensure your CSV file has the required column structure.")
+                    return
+                
+                # Show debug information
+                with st.expander("Debug Information", expanded=False):
+                    st.write("**Raw data preview:**")
+                    st.dataframe(df_raw.head())
+                    st.write("**Delivery day column sample:**")
+                    st.write(df_raw['Delivery day'].head(10).tolist())
+                
+                # Preprocess with gas prices
+                df = preprocess_with_gas_prices(df_raw)
+                
+                if df.empty:
+                    st.error("Data preprocessing failed. Please check the debug information and ensure your data format is correct.")
+                    return
+                
+                st.success("✅ Data preprocessed and merged with gas prices successfully!")
             
-            if len(df_filtered) == 0:
-                st.sidebar.warning(f"No data available for selected period")
-                df_filtered = df
-        else:
-            df_filtered = df
-    else:
-        st.sidebar.error("Failed to load data. Using sample data instead.")
-        df_filtered = generate_price_data(48)
-else:
-    # Use sample data when no file is uploaded
-    df_filtered = generate_price_data(48)
-    st.sidebar.info("Using sample data. Upload a CSV file to backtest with your own data.")
-
-# Simulation controls
-st.sidebar.header("Simulation Controls")
-if st.sidebar.button("Start/Stop Real-time Simulation"):
-    st.session_state.simulation_running = not st.session_state.simulation_running
-
-if st.sidebar.button("Reset Metrics"):
-    st.session_state.total_profit = 0
-
-# Process data with strategy
-df_with_strategy = simulate_trading_performance(df_filtered, buy_threshold, sell_threshold, electrolyzer_capacity)
-
-# Current price and status (use last data point)
-current_price = df_with_strategy.iloc[-1]['price']
-current_action, action_description = calculate_strategy_decision(current_price, buy_threshold, sell_threshold)
-
-# Main metrics row
-col1, col2, col3, col4 = st.columns(4)
-
-with col1:
-    if len(df_with_strategy) > 1:
-        price_delta = current_price - df_with_strategy.iloc[-2]['price']
-    else:
-        price_delta = 0
-    
-    st.metric(
-        "Current Price",
-        f"€{current_price:.2f}/MWh",
-        delta=f"{price_delta:.2f}",
-        delta_color="inverse"
-    )
-
-with col2:
-    st.metric(
-        "Current Strategy",
-        current_action,
-        help=action_description
-    )
-
-with col3:
-    total_profit = df_with_strategy['profit'].sum()
-    st.metric(
-        "Total Profit",
-        f"€{total_profit:,.0f}",
-        delta=f"{total_profit * 0.05:.0f}"
-    )
-
-with col4:
-    total_energy_stored = df_with_strategy['energy_stored_mwh'].sum()
-    st.metric(
-        "Energy Stored",
-        f"{total_energy_stored:.1f} MWh",
-        delta=f"{total_energy_stored * 0.1:.1f}"
-    )
-
-# Charts section
-st.subheader("Position-Based Trading Strategy")
-
-fig = go.Figure()
-
-# Separate data by strategy
-buy_periods = df_with_strategy[df_with_strategy['action'] == 'BUY']
-sell_periods = df_with_strategy[df_with_strategy['action'] == 'SELL']
-hold_periods = df_with_strategy[df_with_strategy['action'] == 'HOLD']
-electrolyzer_periods = df_with_strategy[df_with_strategy['action'] == 'ELECTROLYZER']
-wait_periods = df_with_strategy[df_with_strategy['action'] == 'WAIT']
-
-# Main price line
-fig.add_trace(go.Scatter(
-    x=df_with_strategy['timestamp'],
-    y=df_with_strategy['price'],
-    mode='lines',
-    name='Electricity Price',
-    line=dict(color='darkblue', width=2),
-    hovertemplate='<b>Price</b>: €%{y:.2f}/MWh<br><b>Time</b>: %{x}<extra></extra>'
-))
-
-# Add position background shading
-position_open = False
-position_start = None
-
-for i, row in df_with_strategy.iterrows():
-    if row['action'] == 'BUY' and not position_open:
-        position_open = True
-        position_start = row['timestamp']
-    elif row['action'] in ['SELL', 'ELECTROLYZER'] and position_open:
-        position_open = False
-        if position_start is not None:
-            # Shade the position period
-            fig.add_vrect(
-                x0=position_start, 
-                x1=row['timestamp'],
-                fillcolor='lightblue', 
-                opacity=0.3,
-                layer="below", 
-                line_width=0,
-                annotation_text="Position Open",
-                annotation_position="top left"
-            )
-
-# Add strategy markers with clear labels
-if not buy_periods.empty:
-    fig.add_trace(go.Scatter(
-        x=buy_periods['timestamp'],
-        y=buy_periods['price'],
-        mode='markers',
-        name='BUY Signal (Open Position)',
-        marker=dict(color='blue', size=12, symbol='circle'),
-        hovertemplate='<b>BUY SIGNAL</b><br>Price: €%{y:.2f}/MWh<br>Time: %{x}<br>Action: Open Position<extra></extra>'
-    ))
-
-if not sell_periods.empty:
-    fig.add_trace(go.Scatter(
-        x=sell_periods['timestamp'],
-        y=sell_periods['price'],
-        mode='markers',
-        name='SELL Signal (Close Position)',
-        marker=dict(color='red', size=12, symbol='triangle-up'),
-        hovertemplate='<b>SELL SIGNAL</b><br>Price: €%{y:.2f}/MWh<br>Time: %{x}<br>Action: Close Position (Profit)<extra></extra>'
-    ))
-
-if not electrolyzer_periods.empty:
-    fig.add_trace(go.Scatter(
-        x=electrolyzer_periods['timestamp'],
-        y=electrolyzer_periods['price'],
-        mode='markers',
-        name='ENERGY STORAGE (Close Position)',
-        marker=dict(color='green', size=12, symbol='diamond'),
-        hovertemplate='<b>ENERGY STORAGE</b><br>Price: €%{y:.2f}/MWh<br>Time: %{x}<br>Action: Convert to Stored Energy (0.7 efficiency)<extra></extra>'
-    ))
-
-if not hold_periods.empty:
-    fig.add_trace(go.Scatter(
-        x=hold_periods['timestamp'],
-        y=hold_periods['price'],
-        mode='markers',
-        name='HOLD Position',
-        marker=dict(color='orange', size=8, symbol='square'),
-        hovertemplate='<b>HOLDING POSITION</b><br>Price: €%{y:.2f}/MWh<br>Time: %{x}<br>Action: Wait for Exit Signal<extra></extra>'
-    ))
-
-if not wait_periods.empty:
-    fig.add_trace(go.Scatter(
-        x=wait_periods['timestamp'],
-        y=wait_periods['price'],
-        mode='markers',
-        name='WAIT (No Position)',
-        marker=dict(color='gray', size=6, symbol='x'),
-        hovertemplate='<b>WAITING</b><br>Price: €%{y:.2f}/MWh<br>Time: %{x}<br>Action: Wait for Buy Signal<extra></extra>'
-    ))
-
-# Threshold lines
-fig.add_hline(
-    y=buy_threshold, 
-    line_dash="dash", 
-    line_color="blue", 
-    line_width=3,
-    annotation_text=f"BUY Threshold (€{buy_threshold:.1f})",
-    annotation_position="top right"
-)
-fig.add_hline(
-    y=sell_threshold, 
-    line_dash="dash", 
-    line_color="red", 
-    line_width=3,
-    annotation_text=f"SELL Threshold (€{sell_threshold:.1f})",
-    annotation_position="bottom right"
-)
-
-fig.update_layout(
-    title="Position-Based Trading Strategy with Energy Storage",
-    xaxis_title="Time",
-    yaxis_title="Price (€/MWh)",
-    height=500,
-    hovermode='closest',
-    legend=dict(
-        orientation="h",
-        yanchor="bottom",
-        y=1.02,
-        xanchor="right",
-        x=1
-    )
-)
-
-st.plotly_chart(fig, use_container_width=True)
-
-# Strategy Statistics
-st.subheader("Strategy Statistics")
-
-if len(df_with_strategy) > 0:
-    stats_data = df_with_strategy.groupby('action').agg({
-        'price': ['mean', 'min', 'max', 'count'],
-        'profit': ['sum', 'mean'],
-        'energy_stored_mwh': 'sum'
-    }).round(2)
-    
-    # Flatten column names
-    stats_data.columns = ['_'.join(col).strip() for col in stats_data.columns]
-    stats_data = stats_data.reset_index()
-    
-    # Rename columns for display
-    display_columns = {
-        'action': 'Strategy',
-        'price_count': 'Hours',
-        'price_mean': 'Avg Price (€/MWh)',
-        'price_min': 'Min Price (€/MWh)',
-        'price_max': 'Max Price (€/MWh)',
-        'profit_sum': 'Total Profit (€)',
-        'profit_mean': 'Avg Hourly Profit (€)',
-        'energy_stored_mwh_sum': 'Energy Stored (MWh)'
-    }
-    
-    stats_data = stats_data.rename(columns=display_columns)
-    st.dataframe(stats_data, use_container_width=True)
-
-# Key Insights
-st.subheader("Insights")
-
-col1, col2, col3 = st.columns(3)
-
-with col1:
-    storage_hours = len(df_with_strategy[df_with_strategy['action'] == 'ELECTROLYZER'])
-    total_hours = len(df_with_strategy)
-    utilization = (storage_hours / total_hours) * 100 if total_hours > 0 else 0
-    st.info(f"**Energy Storage Utilization**: {utilization:.1f}% ({storage_hours}/{total_hours} hours)")
-
-with col2:
-    avg_profit_per_hour = df_with_strategy['profit'].mean() if len(df_with_strategy) > 0 else 0
-    st.success(f"**Average Hourly Profit**: €{avg_profit_per_hour:.2f}")
-
-with col3:
-    efficiency_loss = df_with_strategy['energy_stored_mwh'].sum() * 0.3  # 30% loss
-    st.warning(f"**Energy Loss (30%)**: {efficiency_loss:.1f} MWh")
-
-# Data Export
-if uploaded_file is not None:
-    st.subheader("Export Results")
-    
-    col1, col2 = st.columns(2)
-    
-    with col1:
-        csv_data = df_with_strategy.to_csv(index=False)
-        st.download_button(
-            label="Download Detailed Results (CSV)",
-            data=csv_data,
-            file_name=f"energy_storage_backtest_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
-            mime="text/csv"
-        )
-    
-    with col2:
-        # Create summary report
-        summary_data = {
-            'Metric': [
-                'Total Profit (€)',
-                'Energy Stored (MWh)',
-                'Energy Storage Utilization (%)',
-                'Average Hourly Profit (€)',
-                'Buy Threshold (€/MWh)',
-                'Sell Threshold (€/MWh)',
-                'Power Capacity (MW)',
-                'Energy Conversion Efficiency (%)'
-            ],
-            'Value': [
-                f"{total_profit:.2f}",
-                f"{total_energy_stored:.2f}",
-                f"{utilization:.1f}",
-                f"{avg_profit_per_hour:.2f}",
-                f"{buy_threshold:.2f}",
-                f"{sell_threshold:.2f}",
-                f"{electrolyzer_capacity}",
-                "70.0"
-            ]
-        }
-        summary_df = pd.DataFrame(summary_data)
-        summary_csv = summary_df.to_csv(index=False)
+            # Show preprocessing results
+            with st.expander("Preprocessing Results", expanded=True):
+                st.write(f"**Original data shape:** {df_raw.shape}")
+                st.write(f"**Processed data shape:** {df.shape}")
+                st.write(f"**Available columns:** {', '.join(df.columns.tolist())}")
+                
+                if len(df) == 0:
+                    st.error("No data remaining after preprocessing. Check date alignment with gas prices.")
+                    return
+                
+                st.write("**Processed data preview:**")
+                st.dataframe(df.head(10))
+            
+            # Column selection section
+            st.header("Column Selection")
+            st.markdown("Select which columns contain your data:")
+            
+            # Automatically detect Price and Settlement columns if they exist
+            price_default_idx = 0
+            settlement_default_idx = 0
+            
+            if 'Price' in df.columns:
+                price_default_idx = df.columns.tolist().index('Price')
+            if 'Settlement' in df.columns:
+                settlement_default_idx = df.columns.tolist().index('Settlement')
+            
+            col1, col2 = st.columns(2)
+            
+            with col1:
+                price_column = st.selectbox(
+                    "Select Price Column",
+                    options=df.columns.tolist(),
+                    index=price_default_idx,
+                    help="Column containing electricity prices (should be 'Price' after preprocessing)"
+                )
+            
+            with col2:
+                settlement_column = st.selectbox(
+                    "Select Gas Settlement Column", 
+                    options=df.columns.tolist(),
+                    index=settlement_default_idx,
+                    help="Column containing gas settlement prices (should be 'Settlement' after preprocessing)"
+                )
+            
+            # Validate column selection
+            if price_column == settlement_column:
+                st.warning("Please select different columns for price and settlement data!")
+                return
+            
+            # Optional date filtering
+            st.header("Date Range Selection")
+            
+            # Get date range from index
+            min_date = df.index.min().date()
+            max_date = df.index.max().date()
+            
+            col1, col2 = st.columns(2)
+            with col1:
+                start_date = st.date_input(
+                    "Start Date",
+                    value=min_date,
+                    min_value=min_date,
+                    max_value=max_date
+                )
+            
+            with col2:
+                end_date = st.date_input(
+                    "End Date",
+                    value=max_date,
+                    min_value=min_date,
+                    max_value=max_date
+                )
+            
+            # Apply date filter
+            if start_date <= end_date:
+                date_mask = (df.index.date >= start_date) & (df.index.date <= end_date)
+                original_length = len(df)
+                df = df[date_mask]
+                
+                if len(df) < original_length:
+                    st.success(f"Date filter applied: {len(df):,} rows selected from {original_length:,} total rows")
+                else:
+                    st.info("No filtering applied - selected range includes all data")
+            else:
+                st.error("End date must be after start date!")
+                return
+            
+            # Display data info
+            with st.expander("Data Overview", expanded=True):
+                st.write(f"**Final data shape:** {df.shape}")
+                st.write(f"**Selected Price Column:** {price_column}")
+                st.write(f"**Selected Settlement Column:** {settlement_column}")
+                st.write(f"**Date Range:** {start_date} to {end_date}")
+                st.write(f"**Time Interval:** {time_interval} minutes")
+                
+                # Show column statistics
+                col_stats1, col_stats2 = st.columns(2)
+                
+                with col_stats1:
+                    st.write(f"**{price_column} Statistics:**")
+                    if pd.api.types.is_numeric_dtype(df[price_column]):
+                        st.write(f"- Min: {df[price_column].min():.2f}")
+                        st.write(f"- Max: {df[price_column].max():.2f}")
+                        st.write(f"- Mean: {df[price_column].mean():.2f}")
+                        st.write(f"- Missing values: {df[price_column].isnull().sum()}")
+                    else:
+                        st.write("Column appears to be non-numeric")
+                
+                with col_stats2:
+                    st.write(f"**{settlement_column} Statistics:**")
+                    if pd.api.types.is_numeric_dtype(df[settlement_column]):
+                        st.write(f"- Min: {df[settlement_column].min():.2f}")
+                        st.write(f"- Max: {df[settlement_column].max():.2f}")
+                        st.write(f"- Mean: {df[settlement_column].mean():.2f}")
+                        st.write(f"- Missing values: {df[settlement_column].isnull().sum()}")
+                    else:
+                        st.write("Column appears to be non-numeric")
+                
+                st.write("**Sample data:**")
+                st.dataframe(df.head())
+                
+                # Summary metrics
+                metrics_col1, metrics_col2, metrics_col3 = st.columns(3)
+                with metrics_col1:
+                    st.metric("Total Records", len(df))
+                with metrics_col2:
+                    st.metric("Total Missing Values", df.isnull().sum().sum())
+                with metrics_col3:
+                    if time_interval == 60:
+                        st.metric("Equivalent Hours", len(df))
+                    else:
+                        equivalent_hours = len(df) * time_interval / 60
+                        st.metric("Equivalent Hours", f"{equivalent_hours:.1f}")
+            
+            # Validate that selected columns are numeric
+            numeric_issues = []
+            if not pd.api.types.is_numeric_dtype(df[price_column]):
+                numeric_issues.append(f"Price column '{price_column}' is not numeric")
+            if not pd.api.types.is_numeric_dtype(df[settlement_column]):
+                numeric_issues.append(f"Settlement column '{settlement_column}' is not numeric")
+            
+            if numeric_issues:
+                st.error("Column Type Issues:")
+                for issue in numeric_issues:
+                    st.write(f"- {issue}")
+                st.info("Please select columns that contain numeric data for the simulation to work properly.")
+                return
+            
+            # Run simulation
+            if st.button("Run Simulation", type="primary"):
+                with st.spinner("Running simulation..."):
+                    result_df, operating_hours, total_profit = spot(
+                        df, price_column, settlement_column, efficiency_parameter, certificates, time_interval
+                    )
+                
+                # Display results
+                st.header("Simulation Results")
+                
+                col1, col2, col3 = st.columns(3)
+                
+                with col1:
+                    st.metric(
+                        "Operating Hours", 
+                        f"{operating_hours:,.1f}",
+                        help=f"Number of hours the electrolyser would operate (adjusted for {time_interval}-minute intervals)"
+                    )
+                
+                with col2:
+                    st.metric(
+                        "Total Profit", 
+                        f"€{total_profit:,.2f}",
+                        help=f"Total profit from the strategy (adjusted for {time_interval}-minute intervals)"
+                    )
+                
+                with col3:
+                    total_possible_hours = len(df) * time_interval / 60
+                    utilization = (operating_hours / total_possible_hours) * 100 if total_possible_hours > 0 else 0
+                    st.metric(
+                        "Utilization Rate",
+                        f"{utilization:.1f}%",
+                        help="Percentage of time the electrolyser operates"
+                    )
+                
+                # Additional metrics for different time intervals
+                if time_interval != 60:
+                    st.info(f"**Time Resolution Impact:** With {time_interval}-minute intervals, profit is calculated as {time_interval}/60 = {time_interval/60:.2f} of hourly profit per period.")
+                
+                # Visualization
+                st.header("Price Analysis & Operations")
+                
+                if operating_hours > 0:
+                    fig = create_visualization(result_df, price_column, time_interval)
+                    st.plotly_chart(fig, use_container_width=True)
+                    
+                    # Additional insights
+                    st.subheader("Key Insights")
+                    avg_profit_per_hour = total_profit / operating_hours if operating_hours > 0 else 0
+                    
+                    insight_col1, insight_col2 = st.columns(2)
+                    with insight_col1:
+                        st.info(f"Average profit per operating hour: €{avg_profit_per_hour:.2f}")
+                    with insight_col2:
+                        st.info(f"System operates {utilization:.1f}% of the time")
+                    
+                    # Time-specific insights
+                    operating_periods = result_df['operate'].sum()
+                    st.info(f"Operating periods: {operating_periods:,} ({time_interval}-minute intervals)")
+                        
+                else:
+                    st.warning("No profitable operating hours found with current parameters. Try adjusting the efficiency parameter or certificate price.")
+                    
+                    # Still show price chart for reference
+                    fig = go.Figure()
+                    fig.add_trace(go.Scatter(
+                        x=result_df.index,
+                        y=result_df[price_column],
+                        mode='lines',
+                        name='Electricity Price',
+                        line=dict(color='blue')
+                    ))
+                    fig.add_trace(go.Scatter(
+                        x=result_df.index,
+                        y=result_df['buy_threshold'],
+                        mode='lines',
+                        name='Buy Threshold',
+                        line=dict(color='red', dash='dash')
+                    ))
+                    fig.update_layout(
+                        title=f"Price vs Buy Threshold ({time_interval}-minute intervals)",
+                        xaxis_title="Time Period",
+                        yaxis_title="Price (€/MWh)",
+                        height=400
+                    )
+                    st.plotly_chart(fig, use_container_width=True)
+                
+                # Optional: Download results
+                if st.checkbox("Show detailed results"):
+                    st.subheader("Detailed Results")
+                    display_columns = [price_column, settlement_column, 'buy_threshold', 'operate', 'profit']
+                    result_display = result_df[display_columns].copy()
+                    
+                    # Add time interval info to column names
+                    result_display = result_display.rename(columns={
+                        'profit': f'profit_({time_interval}min)',
+                        'operate': f'operate_({time_interval}min)'
+                    })
+                    
+                    st.dataframe(result_display)
+                    
+                    # Download button
+                    csv_data = result_display.to_csv(index=True)
+                    st.download_button(
+                        label="Download Results as CSV",
+                        data=csv_data,
+                        file_name=f"electrolyser_simulation_results_{time_interval}min.csv",
+                        mime="text/csv"
+                    )
         
-        st.download_button(
-            label="Download Summary Report (CSV)",
-            data=summary_csv,
-            file_name=f"energy_storage_summary_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
-            mime="text/csv"
-        )
+        except Exception as e:
+            st.error(f"Error processing file: {str(e)}")
+            st.info("Please ensure your CSV file contains the required 'Delivery day' column and is properly formatted.")
+            # Show the full error traceback for debugging
+            import traceback
+            with st.expander("Full Error Details", expanded=False):
+                st.code(traceback.format_exc())
+    
+    else:
+        st.info("Please upload a CSV file to get started.")
+        
+        # Show example of expected data format
+        with st.expander("Expected Data Format", expanded=True):
+            st.markdown("""
+            **🔄 Automatic Data Preprocessing Enabled!**
+            
+            Your CSV file must contain:
+            - **'Delivery day' column** (required): Date information that will be used for merging with gas prices
+            - **Hourly price columns**: Hour 1, Hour 2, ..., Hour 24 (or similar hourly data)
+            
+            **What happens automatically:**
+            1. Your data is loaded and indexed by the 'Delivery day' column
+            2. Gas prices are automatically merged from the system database
+            3. Data is reshaped from wide format (hourly columns) to long format
+            4. You can then select the appropriate price and settlement columns
+            
+            **Example Input Format:**
+            ```
+            Delivery day,Hour 1,Hour 2,Hour 3,...,Hour 24
+            01/01/2024,45.2,52.1,38.7,...,42.3
+            02/01/2024,47.5,49.8,41.2,...,45.1
+            ...
+            ```
+            
+            **After Preprocessing:**
+            ```
+            Date,Hour,Price,Settlement
+            2024-01-01,Hour 1,45.2,30.5
+            2024-01-01,Hour 2,52.1,30.5
+            2024-01-01,Hour 3,38.7,30.5
+            ...
+            ```
+            
+            **Time Intervals Supported:**
+            - 15 minutes: Profit = (hourly_profit × 15/60)
+            - 30 minutes: Profit = (hourly_profit × 30/60)  
+            - 60 minutes: Standard hourly calculation
+            
+            **Note:** Gas prices are automatically loaded from the system database and merged with your data based on the delivery date.
+            """)
+
+if __name__ == "__main__":
+    main()
