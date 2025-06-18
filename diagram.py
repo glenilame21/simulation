@@ -409,15 +409,6 @@ def main():
         st.info("Make sure the Google Sheets are publicly accessible and the URLs are correct.")
         return
     
-    # Display gas prices information
-    with st.expander("Gas Prices Information"):
-        global gas_prices_df
-        st.write(f"**Gas price source:** {gas_file_option}")
-        st.write(f"**Gas prices loaded:** {len(gas_prices_df)} records")
-        st.write(f"**Date range:** {gas_prices_df.index.min()} to {gas_prices_df.index.max()}")
-        st.write(f"**Columns:** {', '.join(gas_prices_df.columns.tolist())}")
-        st.write("**Preview:**")
-        st.dataframe(gas_prices_df.tail())
     
     with st.sidebar:
         # File upload
@@ -863,28 +854,6 @@ def main():
     else:
         st.info("Please upload a CSV file to get started.")
         
-        # Show sample data format when no file is uploaded
-        with st.expander("Expected Data Format", expanded=True):
-            st.write("**For hourly data with gas price merging:**")
-            st.write("Your CSV should contain a 'Delivery day' column and hourly price columns (Hour 1, Hour 2, etc.)")
-            
-            sample_data = {
-                'Delivery day': ['2024-01-01', '2024-01-02', '2024-01-03'],
-                'Hour 1': [45.2, 38.7, 42.1],
-                'Hour 2': [43.8, 36.9, 40.5],
-                'Hour 3': [41.2, 35.4, 38.9]
-            }
-            st.dataframe(pd.DataFrame(sample_data))
-            
-            st.write("**For standard price/settlement data:**")
-            st.write("Your CSV should contain price and optionally settlement columns with date/time information")
-            
-            sample_data_2 = {
-                'DateTime': ['2024-01-01 00:00', '2024-01-01 01:00', '2024-01-01 02:00'],
-                'Electricity_Price': [45.2, 43.8, 41.2],
-                'Gas_Price': [85.0, 85.0, 85.0]
-            }
-            st.dataframe(pd.DataFrame(sample_data_2))
 
 if __name__ == "__main__":
     main()
