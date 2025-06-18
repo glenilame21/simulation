@@ -15,14 +15,12 @@ def load_gas_prices(gas_file_option="Month Ahead"):
         if gas_file_option == "Month Ahead":
             gas_path = "C:/Users/Z_LAME/Desktop/Crawler/Electrolyser/gas_streamlit.csv"
         else:  # Spot
-            gas_path = "C:/Users/Z_LAME/Desktop/Crawler/Electrolyser/gas_streamlit1.csv"
+            gas_path = "C:/Users/Z_LAME/Desktop/Crawler/Electrolyser/Gas_D1.csv"
         
         if os.path.exists(gas_path):
             gas_prices_df = pd.read_csv(gas_path)
             gas_prices_df = gas_prices_df.set_index('Date')
-            # Convert gas prices index to datetime
             gas_prices_df.index = pd.to_datetime(gas_prices_df.index)
-            st.success(f"Gas prices loaded successfully from {gas_file_option} file: {len(gas_prices_df)} records")
             return True
         else:
             st.error(f"Gas prices file not found at: {gas_path}")
@@ -33,49 +31,42 @@ def load_gas_prices(gas_file_option="Month Ahead"):
 
 def preprocess_with_gas_prices(df, use_manual_threshold=False, manual_threshold_value=None):
     """
+    Traders want to have the option of either using a manual threshold for gas Price or a dropdown that let's them pick M1 or D1
+    For this reason, by default the function above will load Month Ahead in memory and use that as the default value for the threshold
+    If users choose otherwise then this function comes in play
     Preprocess uploaded data by merging with gas prices OR using manual threshold
     Expected: df must contain a column named 'Delivery day'
     """
     global gas_prices_df
-        
-    # Preprocess the uploaded data - following your working prototype
+    
     processed_df = df.copy()
     processed_df = processed_df.set_index('Delivery day')
     processed_df.index.name = 'Date'
     processed_df = processed_df.sort_index()
     
-    # Convert index to datetime (this was the main issue in your original code)
     processed_df.index = pd.to_datetime(processed_df.index, dayfirst=True)
     
-    # Handle gas prices - either merge with actual gas prices or use manual threshold
     if use_manual_threshold and manual_threshold_value is not None:
-        # Create a Settlement column with manual threshold value for all rows
         merged = processed_df.copy()
         merged['Settlement'] = manual_threshold_value
         st.info(f"Using manual threshold of €{manual_threshold_value:.2f}/MWh as Settlement price for all periods")
     else:
-        # Merge with gas prices
         try:
             merged = pd.merge(processed_df, gas_prices_df, how="inner", on="Date")
         except Exception as e:
             st.error(f"Merge error: {str(e)}")
             return pd.DataFrame()  # Return empty DataFrame on error
     
-    # Rename Hour 3A to Hour 3 if it exists
     if 'Hour 3A' in merged.columns:
         merged = merged.rename(columns={'Hour 3A': 'Hour 3'})
     
-    # Reshape the data - using your working prototype logic
     hour_columns = [f'Hour {i}' for i in range(1, 25)]
-    # Filter to only existing columns
     hour_columns = [col for col in hour_columns if col in merged.columns]
     
     if not hour_columns:
-        # If no hour columns found, assume it's already in the right format
         st.warning("No hour columns found for reshaping. Using data as-is.")
         return merged
     
-    # Reset index for melting
     merged_reset = merged.reset_index()
     
     reshaped_df = pd.melt(
@@ -86,7 +77,6 @@ def preprocess_with_gas_prices(df, use_manual_threshold=False, manual_threshold_
         value_name='Price'
     )
     
-    # Extract hour number and sort
     reshaped_df['Hour_num'] = reshaped_df['Hour'].str.extract('(\d+)').astype(int)
     reshaped_df = reshaped_df.sort_values(['Date', 'Hour_num'])
     reshaped_df = reshaped_df.drop('Hour_num', axis=1)
@@ -96,21 +86,25 @@ def preprocess_with_gas_prices(df, use_manual_threshold=False, manual_threshold_
 
 def spot(df, price_col, settlement_col, efficiency_parameter, certificates, time_interval_minutes, power_energy=1.0, manual_threshold=None):
     """
-    Fixed spot function with better handling for Series values
+    Here the idea is that we buy electricity when the threshold is hit so that we send it to the electrolyser
+    Ideally this works best with negative power prices where you get paid for getting energy
     """
     result_df = df.copy()
     
-    # Initialize columns
-    result_df['operate'] = False
-    result_df['profit'] = 0.0
+    # Here we initialize the columns we will plot as results in the end
+    result_df['operate'] = False # a yes or no variable that will count how many times the threshold was hit and therefore the electolyser was used
+    result_df['profit'] = 0.0 # easy to understand, a column for profit
     result_df['buy_threshold'] = None
-    result_df['MegaWatt'] = 0.0
-    result_df['profit_per_mw'] = 0.0
+    result_df['MegaWatt'] = 0.0 # Traders also want to see the amount of MW/h generated
+    result_df['profit_per_mw'] = 0.0 #idk why this is here
+    result_df['gas_generated_mwh'] = 0.0 # Gas generated in MWh
     
-    time_factor = time_interval_minutes / 60.0  
+
+    # this is an input field from the user - I can maybe make this a constant so that based on the product being traded the time_interval_minutes is populated
+    time_factor = time_interval_minutes / 60.0  # when we sell a 15-minute product in intraday the profit needs to be devided by 0.25
     missing_data = 0
     
-    # Handle different data structures
+    
     if price_col in result_df.columns:
         price_series = result_df[price_col]
     elif 'Price' in result_df.columns:
@@ -161,15 +155,19 @@ def spot(df, price_col, settlement_col, efficiency_parameter, certificates, time
                 buy_threshold = efficiency_parameter * (certificates + gas_price)
                 el_profit = buy_threshold - price
             
-            # Use iloc for setting values
             result_df.iloc[i, result_df.columns.get_loc('buy_threshold')] = buy_threshold
             
-            # Only operate if price is below threshold (profit > 0)
             if el_profit > 0:
                 result_df.iloc[i, result_df.columns.get_loc('operate')] = True
                 result_df.iloc[i, result_df.columns.get_loc('profit')] = el_profit * time_factor * power_energy
                 result_df.iloc[i, result_df.columns.get_loc('profit_per_mw')] = el_profit * time_factor
                 result_df.iloc[i, result_df.columns.get_loc('MegaWatt')] = power_energy
+                
+                # Calculate gas generation: electricity input * efficiency
+                electricity_consumed_mwh = power_energy * time_factor  # MWh of electricity consumed
+                gas_generated_mwh = electricity_consumed_mwh * efficiency_parameter  # MWh of gas generated
+                
+                result_df.iloc[i, result_df.columns.get_loc('gas_generated_mwh')] = gas_generated_mwh
                 
         except Exception as e:
             missing_data += 1
@@ -179,18 +177,17 @@ def spot(df, price_col, settlement_col, efficiency_parameter, certificates, time
     if missing_data > 0:
         st.warning(f"Missing or invalid data for {missing_data} rows")
     
-    # Calculate totals
+
     total_operating_hours = result_df['operate'].sum() * time_factor
     total_profit = result_df['profit'].sum()
     
-    # Debug info
+   
     operating_count = result_df['operate'].sum()
     st.info(f"Operating in {operating_count} periods out of {len(result_df)} total periods")
     
     return result_df, total_operating_hours, total_profit
 
 def parse_date_column(df, date_col):
-    """Enhanced date parsing with better error handling"""
     try:
         date_formats = [
             '%Y-%m-%d %H:%M:%S',
@@ -287,7 +284,7 @@ def create_enhanced_visualization(df_result, price_col, time_interval_minutes):
     return fig
 
 def calculate_advanced_metrics(df_result, time_interval_minutes, power_energy):
-    """Calculate additional performance metrics"""
+    """Calculate additional performance metrics including gas production"""
     metrics = {}
     
     # Basic metrics
@@ -313,6 +310,15 @@ def calculate_advanced_metrics(df_result, time_interval_minutes, power_energy):
     metrics['total_energy_consumed_mwh'] = total_energy_consumed
     metrics['profit_per_mwh'] = (total_profit / total_energy_consumed) if total_energy_consumed > 0 else 0
     
+    # Gas generation metrics
+    if 'gas_generated_mwh' in df_result.columns:
+        metrics['total_gas_generated_mwh'] = df_result['gas_generated_mwh'].sum()
+        metrics['gas_generation_rate_mwh_per_hour'] = df_result[df_result['operate']]['gas_generated_mwh'].mean() / time_factor if operating_periods > 0 else 0
+        
+        # Profit per MWh of gas generated
+        if metrics['total_gas_generated_mwh'] > 0:
+            metrics['profit_per_mwh_gas'] = total_profit / metrics['total_gas_generated_mwh']
+    
     # Price statistics - Fixed to handle different column names
     if operating_periods > 0:
         operating_data = df_result[df_result['operate']]
@@ -332,13 +338,13 @@ def calculate_advanced_metrics(df_result, time_interval_minutes, power_energy):
 
 def main():
     st.set_page_config(
-        page_title="Enhanced Electrolyser Energy Trading Dashboard",
+        page_title="Electrolyser Dashboard",
         page_icon="⚡",
         layout="wide"
     )
     
-    st.title("Enhanced Electrolyser Energy Trading Simulation")
-    st.markdown("Upload your data and configure parameters to simulate electrolyser operations on the energy market.")
+    st.title(" Electrolyser Energy Trading Simulation")
+    st.markdown("Upload your data and configure parameters.")
     
     # Sidebar for parameters
     with st.sidebar:
@@ -354,9 +360,9 @@ def main():
         )
         
         if gas_file_option == "Month Ahead":
-            st.info("Using: gas_streamlit.csv")
+            st.info("Using: Gas Month Ahead")
         else:
-            st.info("Using: gas_streamlit1.csv")
+            st.info("Using: Gas Spot")
     
     # Load gas prices based on selection
     with st.spinner(f"Loading {gas_file_option.lower()} gas prices..."):
@@ -366,14 +372,14 @@ def main():
         st.error("Cannot proceed without gas prices. Please check the gas prices file.")
         return
     
-    with st.expander("Gas Prices Information"):
+    #with st.expander("Gas Prices Information"):
         global gas_prices_df
         st.write(f"**Gas price source:** {gas_file_option}")
         st.write(f"**Gas prices loaded:** {len(gas_prices_df)} records")
         st.write(f"**Date range:** {gas_prices_df.index.min()} to {gas_prices_df.index.max()}")
         st.write(f"**Columns:** {', '.join(gas_prices_df.columns.tolist())}")
         st.write("**Preview:**")
-        st.dataframe(gas_prices_df.head())
+        st.dataframe(gas_prices_df.tail())
     
     with st.sidebar:
         # File upload
@@ -394,7 +400,7 @@ def main():
             value=0.700,
             step=0.001,
             format="%.3f",
-            help="Electrolyser efficiency parameter (typically 0.6-0.8)"
+            help="Electrolyser efficiency parameter (typically 0.6-0.8). This determines gas generation: 1 MWh electricity → efficiency × 1 MWh gas"
         )
 
         power_energy = st.number_input(
@@ -460,11 +466,11 @@ def main():
             has_delivery_day = 'Delivery day' in df_raw.columns
             
             if has_delivery_day:
-                with st.expander("Debug Information", expanded=False):
-                    st.write("**Raw data preview:**")
-                    st.dataframe(df_raw.tail())
-                    st.write("**Delivery day column sample:**")
-                    st.write(df_raw['Delivery day'].head(10).tolist())
+                #with st.expander("Debug Information", expanded=False):
+                #    st.write("**Raw data preview:**")
+                #    st.dataframe(df_raw.tail())
+                #    st.write("**Delivery day column sample:**")
+                #    st.write(df_raw['Delivery day'].head(10).tolist())
                 
                 # Determine preprocessing parameters based on threshold option
                 if threshold_option == "Calculate from Gas Price":
@@ -486,17 +492,17 @@ def main():
                         
                         st.success("Data preprocessed with manual threshold successfully!")
                 
-                with st.expander("Preprocessing Results", expanded=True):
-                    st.write(f"**Original data shape:** {df_raw.shape}")
-                    st.write(f"**Processed data shape:** {df.shape}")
-                    st.write(f"**Available columns:** {', '.join(df.columns.tolist())}")
+                #with st.expander("Preprocessing Results", expanded=True):
+                #    st.write(f"**Original data shape:** {df_raw.shape}")
+                #    st.write(f"**Processed data shape:** {df.shape}")
+                #    st.write(f"**Available columns:** {', '.join(df.columns.tolist())}")
                     
                     if len(df) == 0:
                         st.error("No data remaining after preprocessing.")
                         return
                     
-                    st.write("**Processed data preview:**")
-                    st.dataframe(df.head(10))
+                #    st.write("**Processed data preview:**")
+                #    st.dataframe(df.tail(10))
                 
                 # Automatically detect Price and Settlement columns if they exist
                 price_default_idx = 0
@@ -708,39 +714,52 @@ def main():
                 # Display results
                 st.header("Simulation Results")
                 
-                # Key metrics
-                col1, col2, col3, col4 = st.columns(4)
+                # Key metrics (first row)
+                col1, col2, col3 = st.columns(3)
+                
+                #with col1:
+                #    st.metric("Operating Hours", f"{operating_hours:,.1f}")
                 
                 with col1:
-                    st.metric("Operating Hours", f"{operating_hours:,.1f}")
-                
-                with col2:
                     st.metric("Total Profit", f"€{total_profit:,.2f}")
                 
-                with col3:
-                    st.metric("Utilization Rate", f"{metrics['utilization_rate']:.1f}%")
+                #with col3:
+                #    st.metric("Utilization Rate", f"{metrics['utilization_rate']:.1f}%")
                 
-                with col4:
+                with col2:
                     st.metric("Energy Consumed", f"{metrics['total_energy_consumed_mwh']:.1f} MWh")
+
                 
-                # Additional metrics
-                col5, col6, col7, col8 = st.columns(4)
-                
-                with col5:
-                    st.metric("Profit per MWh", f"€{metrics['profit_per_mwh']:.2f}")
-                
-                with col6:
-                    if metrics['operating_periods'] > 0:
-                        st.metric("Avg Profit/Period", f"€{metrics['avg_profit_per_operating_period']:.2f}")
+                with col3:
+                    if 'total_gas_generated_mwh' in metrics:
+                        st.metric("Gas Generated", f"{metrics['total_gas_generated_mwh']:.1f} MWh")
                     else:
-                        st.metric("Avg Profit/Period", "€0.00")
+                        st.metric("Avg Profit/Period", f"€{metrics['avg_profit_per_operating_period']:.2f}")
                 
-                with col7:
-                    st.metric("Operating Periods", f"{metrics['operating_periods']:,}")
+                # Additional metrics (second row)
+                #col3, col4= st.columns(2)
                 
-                with col8:
-                    total_possible_hours = len(processed_df) * time_interval / 60
-                    st.metric("Total Possible Hours", f"{total_possible_hours:.1f}")
+                #with col3:
+                #    st.metric("Profit per MWh Input", f"€{metrics['profit_per_mwh']:.2f}")
+                
+                #with col3:
+                #    if 'total_gas_generated_mwh' in metrics:
+                #        st.metric("Gas Generated", f"{metrics['total_gas_generated_mwh']:.1f} MWh")
+                #    else:
+                #        st.metric("Avg Profit/Period", f"€{metrics['avg_profit_per_operating_period']:.2f}")
+                
+                #with col7:
+                #    if 'profit_per_mwh_gas' in metrics:
+                #        st.metric("Profit per MWh Gas", f"€{metrics['profit_per_mwh_gas']:.2f}")
+                #    else:
+                #        st.metric("Operating Periods", f"{metrics['operating_periods']:,}")
+                
+                #with col8:
+                #    if 'gas_generation_rate_mwh_per_hour' in metrics:
+                        st.metric("Gas Rate", f"{metrics['gas_generation_rate_mwh_per_hour']:.2f} MWh/h")
+                #    else:
+                #        total_possible_hours = len(processed_df) * time_interval / 60
+                #        st.metric("Total Possible Hours", f"{total_possible_hours:.1f}")
                 
                 # Visualization
                 st.header("Analysis Dashboard")
@@ -763,6 +782,26 @@ def main():
                         
                         if time_interval != 60:
                             st.info(f"**Time Resolution:**\nProfit adjusted for {time_interval}-minute intervals ({time_interval/60:.2f}x hourly rate)")
+                    
+                    # Add gas generation insights
+                    #if 'total_gas_generated_mwh' in metrics and metrics['total_gas_generated_mwh'] > 0:
+                    #    st.subheader("Gas Generation Summary")
+                        
+                        gas_col1, gas_col2 = st.columns(2)
+                        
+        #                with gas_col1:
+        #                    st.info(f"""**Production Summary:**
+        #- Total gas generated: {metrics['total_gas_generated_mwh']:.1f} MWh
+        #- Average generation rate: {metrics['gas_generation_rate_mwh_per_hour']:.2f} MWh/hour
+        #- Efficiency factor used: {efficiency_parameter:.1%}""")
+                        
+        #                with gas_col2:
+        #                    efficiency_check = metrics['total_gas_generated_mwh'] / metrics['total_energy_consumed_mwh'] if metrics['total_energy_consumed_mwh'] > 0 else 0
+        #                    st.success(f"""**Efficiency Verification:**
+        #- Electricity consumed: {metrics['total_energy_consumed_mwh']:.1f} MWh
+        #- Gas generated: {metrics['total_gas_generated_mwh']:.1f} MWh  
+        #- Actual efficiency: {efficiency_check:.1%}
+        #- Profit per MWh gas: €{metrics['profit_per_mwh_gas']:.2f}""")
                         
                 else:
                     st.warning("No profitable operating periods found with current parameters.")
@@ -805,73 +844,6 @@ def main():
     else:
         st.info("Please upload a CSV file to get started.")
         
-        # Enhanced example section
-        with st.expander("Expected Data Format & Features", expanded=False):
-            st.markdown("""
-            ### Data Requirements
-            
-            **Option 1: Standard Format**
-            - **Electricity Price**: Numeric values (e.g., €/MWh)
-            - **Gas Settlement Price**: Numeric values (e.g., €/MWh) - *only if calculating threshold from gas price*
-            - **Date/Time**: For filtering specific time periods (optional)
-            
-            **Option 2: Gas Price Preprocessing (Automatic)**
-            - **'Delivery day' column** (required): Date information for merging with gas prices
-            - **Hourly price columns**: Hour 1, Hour 2, ..., Hour 24 (or similar hourly data)
-            
-            ### Operating Strategies
-            
-            **1. Gas-Based Threshold (Recommended)**
-            - Threshold = Efficiency × (Certificates + Gas Price)
-            - Operates when: Electricity Price < Threshold
-            - Most realistic approach for hydrogen production
-            - Supports automatic gas price loading and preprocessing
-            
-            **2. Manual Threshold**
-            - Fixed price threshold (e.g., €100/MWh)
-            - Operates when: Electricity Price < Manual Threshold
-            - Useful for sensitivity analysis
-            - **Now supports data preprocessing even with manual threshold!**
-            
-            ### Automatic Data Preprocessing
-            
-            **What happens when 'Delivery day' column is detected:**
-            1. Your data is loaded and indexed by the 'Delivery day' column
-            2. Data is reshaped from wide format (hourly columns) to long format
-            3. **For Gas-Based Threshold**: Gas prices are automatically merged from the system database
-            4. **For Manual Threshold**: Only data reshaping is performed (no gas price merging)
-            5. You can then select the appropriate price and settlement columns
-            
-            ### Time Intervals Supported
-            - **15 minutes**: Ultra-high frequency trading
-            - **30 minutes**: High frequency analysis  
-            - **60 minutes**: Standard hourly analysis
-            
-            ### Key Metrics Calculated
-            - Total profit and operating hours
-            - Utilization rate and energy consumption
-            - Profit per MWh and per operating period
-            - Price statistics during operation
-            
-            ### Example Data Formats
-            
-            **Standard Format:**
-            ```csv
-            DateTime,Product,Electricity_Price,Gas_Settlement
-            2024-01-01 00:00:00,DAM,45.2,30.5
-            2024-01-01 01:00:00,DAM,52.1,31.2
-            2024-01-01 02:00:00,DAM,38.7,29.8
-            ```
-            
-            **Gas Preprocessing Format:**
-            ```csv
-            Delivery day,Hour 1,Hour 2,Hour 3,...,Hour 24
-            01/01/2024,45.2,52.1,38.7,...,42.3
-            02/01/2024,47.5,49.8,41.2,...,45.1
-            ```
-            
-            Column names can be customized - you'll select them after upload!
-            """)
 
 if __name__ == "__main__":
     main()
