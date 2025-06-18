@@ -4,7 +4,8 @@ import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 import numpy as np
 from datetime import datetime, date
-import os
+import requests
+from io import StringIO
 
 # Global variable to store gas prices
 gas_prices_df = None
@@ -13,18 +14,40 @@ def load_gas_prices(gas_file_option="Month Ahead"):
     global gas_prices_df
     try:
         if gas_file_option == "Month Ahead":
-            gas_path = "C:/Users/Z_LAME/Desktop/Crawler/Electrolyser/gas_streamlit.csv"
+            gas_url = "https://docs.google.com/spreadsheets/d/1scfhBGJNj1s7P2jJQseeR8zlaN26Dyekpm8gbE3pYzY/export?format=csv"
         else:  # Spot
-            gas_path = "C:/Users/Z_LAME/Desktop/Crawler/Electrolyser/Gas_D1.csv"
+            gas_url = "https://docs.google.com/spreadsheets/d/12ESt-pVMbA7Q7YcnRfd8-fgqL8qb0l4vev8-uqwpLMY/export?format=csv"
         
-        if os.path.exists(gas_path):
-            gas_prices_df = pd.read_csv(gas_path)
-            gas_prices_df = gas_prices_df.set_index('Date')
-            gas_prices_df.index = pd.to_datetime(gas_prices_df.index)
-            return True
-        else:
-            st.error(f"Gas prices file not found at: {gas_path}")
+        # Make HTTP request to download the CSV
+        response = requests.get(gas_url, timeout=30)
+        response.raise_for_status()  # Raises an HTTPError for bad responses
+        
+        # Read CSV from the response content
+        csv_content = StringIO(response.text)
+        gas_prices_df = pd.read_csv(csv_content)
+        
+        # Check if the data was loaded properly
+        if gas_prices_df.empty:
+            st.error("Downloaded gas prices file is empty")
             return False
+            
+        # Ensure 'Date' column exists
+        if 'Date' not in gas_prices_df.columns:
+            st.error(f"'Date' column not found in gas prices. Available columns: {list(gas_prices_df.columns)}")
+            return False
+            
+        gas_prices_df = gas_prices_df.set_index('Date')
+        gas_prices_df.index = pd.to_datetime(gas_prices_df.index)
+        
+        st.success(f"Successfully loaded {len(gas_prices_df)} gas price records from Google Sheets")
+        return True
+        
+    except requests.exceptions.RequestException as e:
+        st.error(f"Network error loading gas prices: {str(e)}")
+        return False
+    except pd.errors.EmptyDataError:
+        st.error("Gas prices file is empty or corrupted")
+        return False
     except Exception as e:
         st.error(f"Error loading gas prices: {str(e)}")
         return False
@@ -336,6 +359,18 @@ def calculate_advanced_metrics(df_result, time_interval_minutes, power_energy):
     
     return metrics
 
+def test_google_sheets_connection(url):
+    """Test if a Google Sheets URL is accessible"""
+    try:
+        response = requests.get(url, timeout=10)
+        response.raise_for_status()
+        if len(response.text) > 0:
+            return True, "Connection successful"
+        else:
+            return False, "Empty response"
+    except requests.exceptions.RequestException as e:
+        return False, f"Connection failed: {str(e)}"
+
 def main():
     st.set_page_config(
         page_title="Electrolyser Dashboard",
@@ -343,7 +378,7 @@ def main():
         layout="wide"
     )
     
-    st.title(" Electrolyser Energy Trading Simulation")
+    st.title("⚡ Electrolyser Energy Trading Simulation")
     st.markdown("Upload your data and configure parameters.")
     
     # Sidebar for parameters
@@ -363,16 +398,19 @@ def main():
             st.info("Using: Gas Month Ahead")
         else:
             st.info("Using: Gas Spot")
-    
+        
+
     # Load gas prices based on selection
-    with st.spinner(f"Loading {gas_file_option.lower()} gas prices..."):
+    with st.spinner(f"Loading {gas_file_option.lower()} gas prices from Google Sheets..."):
         gas_loaded = load_gas_prices(gas_file_option)
     
     if not gas_loaded:
-        st.error("Cannot proceed without gas prices. Please check the gas prices file.")
+        st.error("Cannot proceed without gas prices. Please check your internet connection and try again.")
+        st.info("Make sure the Google Sheets are publicly accessible and the URLs are correct.")
         return
     
-    #with st.expander("Gas Prices Information"):
+    # Display gas prices information
+    with st.expander("Gas Prices Information"):
         global gas_prices_df
         st.write(f"**Gas price source:** {gas_file_option}")
         st.write(f"**Gas prices loaded:** {len(gas_prices_df)} records")
@@ -466,11 +504,11 @@ def main():
             has_delivery_day = 'Delivery day' in df_raw.columns
             
             if has_delivery_day:
-                #with st.expander("Debug Information", expanded=False):
-                #    st.write("**Raw data preview:**")
-                #    st.dataframe(df_raw.tail())
-                #    st.write("**Delivery day column sample:**")
-                #    st.write(df_raw['Delivery day'].head(10).tolist())
+                with st.expander("Debug Information", expanded=False):
+                    st.write("**Raw data preview:**")
+                    st.dataframe(df_raw.tail())
+                    st.write("**Delivery day column sample:**")
+                    st.write(df_raw['Delivery day'].head(10).tolist())
                 
                 # Determine preprocessing parameters based on threshold option
                 if threshold_option == "Calculate from Gas Price":
@@ -492,17 +530,17 @@ def main():
                         
                         st.success("Data preprocessed with manual threshold successfully!")
                 
-                #with st.expander("Preprocessing Results", expanded=True):
-                #    st.write(f"**Original data shape:** {df_raw.shape}")
-                #    st.write(f"**Processed data shape:** {df.shape}")
-                #    st.write(f"**Available columns:** {', '.join(df.columns.tolist())}")
+                with st.expander("Preprocessing Results", expanded=True):
+                    st.write(f"**Original data shape:** {df_raw.shape}")
+                    st.write(f"**Processed data shape:** {df.shape}")
+                    st.write(f"**Available columns:** {', '.join(df.columns.tolist())}")
                     
                     if len(df) == 0:
                         st.error("No data remaining after preprocessing.")
                         return
                     
-                #    st.write("**Processed data preview:**")
-                #    st.dataframe(df.tail(10))
+                    st.write("**Processed data preview:**")
+                    st.dataframe(df.tail(10))
                 
                 # Automatically detect Price and Settlement columns if they exist
                 price_default_idx = 0
@@ -717,14 +755,8 @@ def main():
                 # Key metrics (first row)
                 col1, col2, col3 = st.columns(3)
                 
-                #with col1:
-                #    st.metric("Operating Hours", f"{operating_hours:,.1f}")
-                
                 with col1:
                     st.metric("Total Profit", f"€{total_profit:,.2f}")
-                
-                #with col3:
-                #    st.metric("Utilization Rate", f"{metrics['utilization_rate']:.1f}%")
                 
                 with col2:
                     st.metric("Energy Consumed", f"{metrics['total_energy_consumed_mwh']:.1f} MWh")
@@ -737,29 +769,16 @@ def main():
                         st.metric("Avg Profit/Period", f"€{metrics['avg_profit_per_operating_period']:.2f}")
                 
                 # Additional metrics (second row)
-                #col3, col4= st.columns(2)
+                col4, col5 = st.columns(2)
                 
-                #with col3:
-                #    st.metric("Profit per MWh Input", f"€{metrics['profit_per_mwh']:.2f}")
+                with col4:
+                    st.metric("Utilization Rate", f"{metrics['utilization_rate']:.1f}%")
                 
-                #with col3:
-                #    if 'total_gas_generated_mwh' in metrics:
-                #        st.metric("Gas Generated", f"{metrics['total_gas_generated_mwh']:.1f} MWh")
-                #    else:
-                #        st.metric("Avg Profit/Period", f"€{metrics['avg_profit_per_operating_period']:.2f}")
-                
-                #with col7:
-                #    if 'profit_per_mwh_gas' in metrics:
-                #        st.metric("Profit per MWh Gas", f"€{metrics['profit_per_mwh_gas']:.2f}")
-                #    else:
-                #        st.metric("Operating Periods", f"{metrics['operating_periods']:,}")
-                
-                #with col8:
-                #    if 'gas_generation_rate_mwh_per_hour' in metrics:
+                with col5:
+                    if 'gas_generation_rate_mwh_per_hour' in metrics:
                         st.metric("Gas Rate", f"{metrics['gas_generation_rate_mwh_per_hour']:.2f} MWh/h")
-                #    else:
-                #        total_possible_hours = len(processed_df) * time_interval / 60
-                #        st.metric("Total Possible Hours", f"{total_possible_hours:.1f}")
+                    else:
+                        st.metric("Operating Periods", f"{metrics['operating_periods']:,}")
                 
                 # Visualization
                 st.header("Analysis Dashboard")
@@ -784,24 +803,24 @@ def main():
                             st.info(f"**Time Resolution:**\nProfit adjusted for {time_interval}-minute intervals ({time_interval/60:.2f}x hourly rate)")
                     
                     # Add gas generation insights
-                    #if 'total_gas_generated_mwh' in metrics and metrics['total_gas_generated_mwh'] > 0:
-                    #    st.subheader("Gas Generation Summary")
+                    if 'total_gas_generated_mwh' in metrics and metrics['total_gas_generated_mwh'] > 0:
+                        st.subheader("Gas Generation Summary")
                         
                         gas_col1, gas_col2 = st.columns(2)
                         
-        #                with gas_col1:
-        #                    st.info(f"""**Production Summary:**
-        #- Total gas generated: {metrics['total_gas_generated_mwh']:.1f} MWh
-        #- Average generation rate: {metrics['gas_generation_rate_mwh_per_hour']:.2f} MWh/hour
-        #- Efficiency factor used: {efficiency_parameter:.1%}""")
+                        with gas_col1:
+                            st.info(f"""**Production Summary:**
+- Total gas generated: {metrics['total_gas_generated_mwh']:.1f} MWh
+- Average generation rate: {metrics['gas_generation_rate_mwh_per_hour']:.2f} MWh/hour
+- Efficiency factor used: {efficiency_parameter:.1%}""")
                         
-        #                with gas_col2:
-        #                    efficiency_check = metrics['total_gas_generated_mwh'] / metrics['total_energy_consumed_mwh'] if metrics['total_energy_consumed_mwh'] > 0 else 0
-        #                    st.success(f"""**Efficiency Verification:**
-        #- Electricity consumed: {metrics['total_energy_consumed_mwh']:.1f} MWh
-        #- Gas generated: {metrics['total_gas_generated_mwh']:.1f} MWh  
-        #- Actual efficiency: {efficiency_check:.1%}
-        #- Profit per MWh gas: €{metrics['profit_per_mwh_gas']:.2f}""")
+                        with gas_col2:
+                            efficiency_check = metrics['total_gas_generated_mwh'] / metrics['total_energy_consumed_mwh'] if metrics['total_energy_consumed_mwh'] > 0 else 0
+                            st.success(f"""**Efficiency Verification:**
+- Electricity consumed: {metrics['total_energy_consumed_mwh']:.1f} MWh
+- Gas generated: {metrics['total_gas_generated_mwh']:.1f} MWh  
+- Actual efficiency: {efficiency_check:.1%}
+- Profit per MWh gas: €{metrics['profit_per_mwh_gas']:.2f}""")
                         
                 else:
                     st.warning("No profitable operating periods found with current parameters.")
@@ -844,6 +863,28 @@ def main():
     else:
         st.info("Please upload a CSV file to get started.")
         
+        # Show sample data format when no file is uploaded
+        with st.expander("Expected Data Format", expanded=True):
+            st.write("**For hourly data with gas price merging:**")
+            st.write("Your CSV should contain a 'Delivery day' column and hourly price columns (Hour 1, Hour 2, etc.)")
+            
+            sample_data = {
+                'Delivery day': ['2024-01-01', '2024-01-02', '2024-01-03'],
+                'Hour 1': [45.2, 38.7, 42.1],
+                'Hour 2': [43.8, 36.9, 40.5],
+                'Hour 3': [41.2, 35.4, 38.9]
+            }
+            st.dataframe(pd.DataFrame(sample_data))
+            
+            st.write("**For standard price/settlement data:**")
+            st.write("Your CSV should contain price and optionally settlement columns with date/time information")
+            
+            sample_data_2 = {
+                'DateTime': ['2024-01-01 00:00', '2024-01-01 01:00', '2024-01-01 02:00'],
+                'Electricity_Price': [45.2, 43.8, 41.2],
+                'Gas_Price': [85.0, 85.0, 85.0]
+            }
+            st.dataframe(pd.DataFrame(sample_data_2))
 
 if __name__ == "__main__":
     main()
