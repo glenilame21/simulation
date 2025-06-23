@@ -7,6 +7,8 @@ import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
 import plotly.io as pio
+import plotly.graph_objects as go
+from plotly.subplots import make_subplots
 import requests
 import streamlit as st
 from PIL import Image as PILImage
@@ -124,6 +126,87 @@ def preprocess_with_gas_prices(
     reshaped_df = reshaped_df.set_index("Date")
 
     return reshaped_df
+
+def add_settlement_to_long_format(df, gas_month_ahead_path=None, gas_spot_path=None, gas_threshold=None):
+    """
+    Add settlement column to a dataframe in long format based on gas prices from Month Ahead, Spot,
+    or a manual threshold.
+    
+    Parameters:
+    -----------
+    df : pandas DataFrame
+        DataFrame in long format with DeliveryStart column
+    gas_month_ahead_path : str, optional
+        Path to the gas Month Ahead data
+    gas_spot_path : str, optional
+        Path to the gas Spot data
+    gas_threshold : float, optional
+        Manual threshold value for gas price
+        
+    Returns:
+    --------
+    pandas DataFrame
+        Original DataFrame with added settlement column
+    """
+    import pandas as pd
+    import numpy as np
+    from datetime import datetime, timedelta
+    
+    # Make a copy of the input dataframe to avoid modifying the original
+    result_df = df.copy()
+    
+    # Ensure DeliveryStart is datetime
+    result_df['DeliveryStart'] = pd.to_datetime(result_df['DeliveryStart'])
+    
+    # Create date column from DeliveryStart for easier joining
+    result_df['date'] = result_df['DeliveryStart'].dt.date
+    
+    # Load gas price data if paths are provided
+    gas_month_ahead = None
+    gas_spot = None
+    
+    if gas_month_ahead_path:
+        gas_month_ahead = pd.read_csv(gas_month_ahead_path)
+        gas_month_ahead['date'] = pd.to_datetime(gas_month_ahead['date']).dt.date
+        gas_month_ahead = gas_month_ahead[['date', 'price']].rename(columns={'price': 'month_ahead_price'})
+    
+    if gas_spot_path:
+        gas_spot = pd.read_csv(gas_spot_path)
+        gas_spot['date'] = pd.to_datetime(gas_spot['date']).dt.date
+        gas_spot = gas_spot[['date', 'price']].rename(columns={'price': 'spot_price'})
+    
+    # Join gas price data to the result dataframe
+    if gas_month_ahead is not None:
+        result_df = result_df.merge(gas_month_ahead, on='date', how='left')
+    
+    if gas_spot is not None:
+        result_df = result_df.merge(gas_spot, on='date', how='left')
+    
+    # Determine settlement based on available data
+    if gas_month_ahead is not None and gas_spot is not None:
+        result_df['settlement'] = result_df.apply(
+            lambda row: row['spot_price'] if pd.notna(row['spot_price']) else row['month_ahead_price'], 
+            axis=1
+        )
+    elif gas_month_ahead is not None:
+        result_df['settlement'] = result_df['month_ahead_price']
+    elif gas_spot is not None:
+        result_df['settlement'] = result_df['spot_price']
+    elif gas_threshold is not None:
+        result_df['settlement'] = gas_threshold
+    else:
+        raise ValueError("No settlement data source provided. Please provide at least one of: gas_month_ahead_path, gas_spot_path, or gas_threshold")
+    
+    # Drop intermediate columns
+    columns_to_drop = ['date']
+    if 'month_ahead_price' in result_df.columns:
+        columns_to_drop.append('month_ahead_price')
+    if 'spot_price' in result_df.columns:
+        columns_to_drop.append('spot_price')
+    
+    result_df = result_df.drop(columns=columns_to_drop)
+    
+    return result_df
 
 
 def test_google_sheets_connection(url):

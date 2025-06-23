@@ -3,10 +3,13 @@ import pandas as pd
 import requests
 import streamlit as st
 import plotly.graph_objects as go
+import tempfile
+import os
 
 from logic import (
     load_gas_prices,
     preprocess_with_gas_prices,
+    add_settlement_to_long_format,
     test_google_sheets_connection,
     parse_date_column,
     spot,
@@ -17,21 +20,42 @@ from logic import (
 
 st.set_page_config(page_title="Electrolyser Dashboard", page_icon="⚡", layout="wide")
 
+# Initialize global variable for gas prices
+if 'gas_prices_df' not in st.session_state:
+    st.session_state.gas_prices_df = None
 
-gas_prices_df = None
-
-# Load default gas prices on startup
-load_gas_prices("Month Ahead")
+def load_and_store_gas_prices(gas_file_option):
+    """Load gas prices and store in session state"""
+    success = load_gas_prices(gas_file_option)
+    if success:
+        # Get the global gas_prices_df from the logic module
+        from logic import gas_prices_df
+        st.session_state.gas_prices_df = gas_prices_df.copy() if gas_prices_df is not None else None
+    return success
 
 
 def main():
 
     st.title("Electrolyser Trading Simulation")
     st.markdown("Upload your data and configure parameters.")
+    
+    # Initialize gas prices if not already loaded
+    if st.session_state.gas_prices_df is None:
+        with st.spinner("Loading default gas prices..."):
+            load_and_store_gas_prices("Month Ahead")
 
     # Sidebar for parameters
     with st.sidebar:
         st.header("Configuration")
+
+        # Data format selection - add this at the top of sidebar
+        st.subheader("Data Format")
+        data_format = st.radio(
+            "Select your data format:",
+            options=["Wide Format", "Long Format"],
+            index=0,
+            help="Wide Format: Data with 'Delivery day' column and hourly price columns (Hour 1, Hour 2, etc.)\nLong Format: Data with individual rows for each hour/period"
+        )
 
         # Gas file selection first (before loading)
         st.subheader("Gas Price Source")
@@ -46,7 +70,7 @@ def main():
     with st.spinner(
         f"Loading {gas_file_option.lower()} gas prices from Google Sheets..."
     ):
-        gas_loaded = load_gas_prices(gas_file_option)
+        gas_loaded = load_and_store_gas_prices(gas_file_option)
 
     if not gas_loaded:
         st.error(
@@ -62,7 +86,7 @@ def main():
         uploaded_file = st.file_uploader(
             "Upload CSV Data",
             type=["csv"],
-            help="Upload a CSV file containing a 'Delivery day' column and hourly price data or standard price/settlement data",
+            help="Upload a CSV file. Format depends on your selection above:\n- Wide Format: 'Delivery day' column + hourly columns\n- Long Format: Individual rows for each time period",
         )
 
         st.divider()
@@ -129,18 +153,26 @@ def main():
 
     if uploaded_file is not None:
         try:
+            #first load
             df_raw = pd.read_csv(uploaded_file)
 
-            # Check if we have 'Delivery day' column - this determines preprocessing path
+            # Show data format information
+            #not as important
+            #st.info(f"**Selected format:** {data_format}")
+
+            # Check if format selection matches data structure
             has_delivery_day = "Delivery day" in df_raw.columns
+            
+            # because spot and intraday come in wide or long format I added a button so that the processing is done automatically for each case
+            # if the user will select the wrong option after upload it will show the error
+            #they simply have to change the toggle from Wide to Long or from Long to Wide
+            if data_format == "Wide Format" and not has_delivery_day:
+                st.warning("Wide Format selected but no 'Delivery day' column found. You might want to select Long Format instead.")
+            elif data_format == "Long Format" and has_delivery_day:
+                st.warning("Long Format selected but 'Delivery day' column found. You might want to select Wide Format instead.")
 
-            if has_delivery_day:
-                with st.expander("Debug Information", expanded=False):
-                    st.write("**Raw data preview:**")
-                    st.dataframe(df_raw.tail())
-                    st.write("**Delivery day column sample:**")
-                    st.write(df_raw["Delivery day"].head(10).tolist())
-
+            # Process data based on selected format
+            if data_format == "Wide Format":
                 # Determine preprocessing parameters based on threshold option
                 if threshold_option == "Calculate from Gas Price":
                     with st.spinner(
@@ -159,12 +191,12 @@ def main():
                         st.success(
                             "Data preprocessed and merged with gas prices successfully!"
                         )
-                else:  # Manual threshold
+                else: 
                     with st.spinner("Preprocessing data with manual threshold..."):
                         df = preprocess_with_gas_prices(
                             df_raw,
                             use_manual_threshold=True,
-                            manual_threshold_value=manual_threshold,
+                            manual_threshold_value=manual_threshold
                         )
 
                         if df.empty:
@@ -176,20 +208,7 @@ def main():
                         st.success(
                             "Data preprocessed with manual threshold successfully!"
                         )
-
-                with st.expander("Preprocessing Results", expanded=True):
-                    st.write(f"**Original data shape:** {df_raw.shape}")
-                    st.write(f"**Processed data shape:** {df.shape}")
-                    st.write(f"**Available columns:** {', '.join(df.columns.tolist())}")
-
-                    if len(df) == 0:
-                        st.error("No data remaining after preprocessing.")
-                        return
-
-                    st.write("**Processed data preview:**")
-                    st.dataframe(df.tail(10))
-
-                # Automatically detect Price and Settlement columns if they exist
+                
                 price_default_idx = 0
                 settlement_default_idx = 0
 
@@ -198,54 +217,112 @@ def main():
                 if "Settlement" in df.columns:
                     settlement_default_idx = df.columns.tolist().index("Settlement")
 
-            else:
-                # Use standard processing for data without 'Delivery day'
+            else:  # Long Format
+                # Use long format processing
                 df = df_raw.copy()
+                # Check for required column for long format (DeliveryStart)
+                if "DeliveryStart" not in df.columns:
+                    st.error("Long format data must contain a 'DeliveryStart' column. Please check your data format.")
+                    st.info("Expected columns for long format: DeliveryStart, Price (or similar), and optionally settlement data")
+                    return
 
-                # Smart column detection for any data format
+                # Apply settlement processing based on threshold option
+                if threshold_option == "Calculate from Gas Price":
+                    with st.spinner(f"Processing long format data with {gas_file_option.lower()} gas prices..."):
+                        # Get gas prices from session state
+                        gas_prices_df = st.session_state.gas_prices_df
+                        
+                        if gas_prices_df is None or gas_prices_df.empty:
+                            st.error("Gas prices not loaded. Please refresh the page.")
+                            return
+                        
+                        # Create temporary file for gas prices
+                        temp_dir = tempfile.gettempdir()
+                        temp_gas_file = os.path.join(temp_dir, f"temp_gas_prices_{gas_file_option.lower().replace(' ', '_')}.csv")
+                        
+                        try:
+                            # Prepare gas prices data for the function
+                            gas_df_for_export = gas_prices_df.reset_index()
+                            
+                            # Ensure we have the correct column names
+                            if len(gas_df_for_export.columns) >= 2:
+                                gas_df_for_export.columns = ['date', 'price']
+                            else:
+                                # Handle case where there might be only one column
+                                gas_df_for_export = gas_df_for_export.reset_index()
+                                gas_df_for_export.columns = ['date', 'price']
+                            
+                            # Save to temporary CSV file
+                            gas_df_for_export.to_csv(temp_gas_file, index=False)
+                            
+                            # Use the appropriate gas price file based on selection
+                            if gas_file_option == "Month Ahead":
+                                df = add_settlement_to_long_format(
+                                    df_raw, 
+                                    gas_month_ahead_path=temp_gas_file
+                                )
+                            else:  # Spot
+                                df = add_settlement_to_long_format(
+                                    df_raw, 
+                                    gas_spot_path=temp_gas_file
+                                )
+                            
+                            # Clean up temporary file
+                            try:
+                                os.remove(temp_gas_file)
+                            except:
+                                pass  # Ignore cleanup errors
+                                
+                            st.success(f"Successfully processed long format data with {gas_file_option.lower()} gas prices!")
+                                
+                        except Exception as e:
+                            st.error(f"Error processing gas prices: {str(e)}")
+                            # Fallback to gas threshold
+                            st.warning("Falling back to average gas price as threshold.")
+                            
+                            # Calculate average gas price as fallback
+                            try:
+                                avg_gas_price = gas_prices_df.iloc[:, -1].mean() if not gas_prices_df.empty else 50.0
+                                st.info(f"Using average gas price: €{avg_gas_price:.2f}/MWh")
+                            except:
+                                avg_gas_price = 50.0
+                                st.info(f"Using default gas price: €{avg_gas_price:.2f}/MWh")
+                                
+                            df = add_settlement_to_long_format(
+                                df_raw, 
+                                gas_threshold=avg_gas_price
+                            )
+                else:  # Manual threshold
+                    with st.spinner("Processing long format data with manual threshold..."):
+                        df = add_settlement_to_long_format(
+                            df_raw, 
+                            gas_threshold=manual_threshold
+                        )
+
+                st.success("Long format data processed successfully!")
+
+                # For long format, set default column indices
+                price_keywords = ["price", "electricity", "power", "energy", "spot"]
+                settlement_keywords = ["settlement", "gas", "fuel", "cost"]
+
                 price_default_idx = 0
                 settlement_default_idx = 0
 
-                # Look for common price column names
-                price_keywords = [
-                    "price",
-                    "electricity",
-                    "power",
-                    "energy",
-                    "spot",
-                    "dam",
-                ]
-                settlement_keywords = ["settlement", "gas", "fuel", "cost"]
-
+                # Look for price columns
                 for i, col in enumerate(df.columns):
                     col_lower = col.lower()
-                    # Skip 'Delivery day' for price selection
-                    if "delivery" in col_lower or "date" in col_lower:
-                        continue
-                    # Look for price columns
                     if any(keyword in col_lower for keyword in price_keywords):
                         price_default_idx = i
                         break
 
+                # Look for settlement columns
                 for i, col in enumerate(df.columns):
                     col_lower = col.lower()
-                    # Skip 'Delivery day' for settlement selection
-                    if "delivery" in col_lower or "date" in col_lower:
-                        continue
-                    # Look for settlement/gas columns
                     if any(keyword in col_lower for keyword in settlement_keywords):
                         settlement_default_idx = i
                         break
 
-                # If no keywords found, default to first non-date column
-                if price_default_idx == 0:
-                    for i, col in enumerate(df.columns):
-                        col_lower = col.lower()
-                        if "delivery" not in col_lower and "date" not in col_lower:
-                            price_default_idx = i
-                            break
-
-            # Column selection section
+            # Column selection section (common for both formats)
             st.header("Column Selection")
 
             col1, col2, col3 = st.columns(3)
@@ -268,16 +345,24 @@ def main():
                     settlement_column = st.selectbox(
                         "Gas Price Column (optional)",
                         options=["None"] + df.columns.tolist(),
-                        index=0,
+                        index=settlement_default_idx + 1 if settlement_default_idx >= 0 else 0,
                     )
                     if settlement_column == "None":
                         settlement_column = None
 
             with col3:
+                # For long format, we might want to use DeliveryStart as date column
+                if data_format == "Long Format" and "DeliveryStart" in df.columns:
+                    date_column_options = ["DeliveryStart"] + [col for col in df.columns.tolist() if col != "DeliveryStart"]
+                    date_default_idx = 0
+                else:
+                    date_column_options = ["None"] + df.columns.tolist()
+                    date_default_idx = 0
+
                 date_column = st.selectbox(
                     "Date/Time Column (optional)",
-                    options=["None"] + df.columns.tolist(),
-                    index=0,
+                    options=date_column_options,
+                    index=date_default_idx,
                 )
 
             # Validate required columns
@@ -293,145 +378,79 @@ def main():
             # Data filtering and processing
             processed_df = df.copy()
 
-            # Date filtering - handle both preprocessed and standard data
-            if date_column != "None" and not has_delivery_day:
+            # Date filtering - handle both formats
+            if date_column != "None" and date_column is not None:
                 st.header("Date Range Selection")
 
-                parsed_dates = parse_date_column(processed_df, date_column)
-                if parsed_dates is not None:
-                    processed_df["parsed_date"] = parsed_dates
-
-                    min_date = processed_df["parsed_date"].min().date()
-                    max_date = processed_df["parsed_date"].max().date()
-
-                    col1, col2 = st.columns(2)
-                    with col1:
-                        start_date = st.date_input(
-                            "Start Date",
-                            value=min_date,
-                            min_value=min_date,
-                            max_value=max_date,
-                        )
-                    with col2:
-                        end_date = st.date_input(
-                            "End Date",
-                            value=max_date,
-                            min_value=min_date,
-                            max_value=max_date,
-                        )
-
-                    if start_date <= end_date:
-                        date_mask = (
-                            processed_df["parsed_date"].dt.date >= start_date
-                        ) & (processed_df["parsed_date"].dt.date <= end_date)
-                        processed_df = processed_df[date_mask]
-                        st.success(
-                            f"Filtered to {len(processed_df):,} rows from {start_date} to {end_date}"
-                        )
-                    else:
-                        st.error("End date must be after start date!")
+                # For long format with DeliveryStart, handle datetime parsing
+                if data_format == "Long Format" and date_column == "DeliveryStart":
+                    try:
+                        processed_df["parsed_date"] = pd.to_datetime(processed_df[date_column])
+                    except:
+                        st.error(f"Could not parse {date_column} as datetime. Please check your date format.")
                         return
-            elif has_delivery_day:
-                # Date filtering for preprocessed data
-                st.header("Date Range Selection")
-
-                # Ensure the index is datetime and handle potential errors
-                try:
-                    if hasattr(processed_df.index, "date"):
-                        min_date = processed_df.index.min().date()
-                        max_date = processed_df.index.max().date()
-                    else:
-                        # If index is not datetime, convert it
-                        processed_df.index = pd.to_datetime(processed_df.index)
-                        min_date = processed_df.index.min().date()
-                        max_date = processed_df.index.max().date()
-
-                    col1, col2 = st.columns(2)
-                    with col1:
-                        start_date = st.date_input(
-                            "Start Date",
-                            value=min_date,
-                            min_value=min_date,
-                            max_value=max_date,
-                        )
-                    with col2:
-                        end_date = st.date_input(
-                            "End Date",
-                            value=max_date,
-                            min_value=min_date,
-                            max_value=max_date,
-                        )
-
-                    if start_date <= end_date:
-                        # Convert dates to datetime for comparison
-                        start_datetime = pd.to_datetime(start_date)
-                        end_datetime = (
-                            pd.to_datetime(end_date)
-                            + pd.Timedelta(days=1)
-                            - pd.Timedelta(seconds=1)
-                        )
-
-                        date_mask = (processed_df.index >= start_datetime) & (
-                            processed_df.index <= end_datetime
-                        )
-                        original_length = len(processed_df)
-                        processed_df = processed_df[date_mask]
-
-                        if len(processed_df) < original_length:
-                            st.success(
-                                f"Date filter applied: {len(processed_df):,} rows selected from {original_length:,} total rows"
-                            )
+                elif data_format == "Wide Format" and not processed_df.index.name:
+                    # For wide format without datetime index
+                    parsed_dates = parse_date_column(processed_df, date_column)
+                    if parsed_dates is not None:
+                        processed_df["parsed_date"] = parsed_dates
+                else:
+                    # Use index for wide format with datetime index
+                    try:
+                        if hasattr(processed_df.index, "date"):
+                            processed_df["parsed_date"] = processed_df.index
                         else:
-                            st.info(
-                                "No filtering applied - selected range includes all data"
+                            processed_df.index = pd.to_datetime(processed_df.index)
+                            processed_df["parsed_date"] = processed_df.index
+                    except Exception as date_error:
+                        st.warning(f"Date filtering skipped due to date format issues: {str(date_error)}")
+                        processed_df["parsed_date"] = None
+
+                if "parsed_date" in processed_df.columns and processed_df["parsed_date"] is not None:
+                    try:
+                        min_date = processed_df["parsed_date"].min().date()
+                        max_date = processed_df["parsed_date"].max().date()
+
+                        col1, col2 = st.columns(2)
+                        with col1:
+                            start_date = st.date_input(
+                                "Start Date",
+                                value=min_date,
+                                min_value=min_date,
+                                max_value=max_date,
                             )
-                    else:
-                        st.error("End date must be after start date!")
-                        return
+                        with col2:
+                            end_date = st.date_input(
+                                "End Date",
+                                value=max_date,
+                                min_value=min_date,
+                                max_value=max_date,
+                            )
 
-                except Exception as date_error:
-                    st.warning(
-                        f"Date filtering skipped due to date format issues: {str(date_error)}"
-                    )
-                    st.info(
-                        "Proceeding without date filtering. You can still run the simulation with all available data."
-                    )
-
-            # Display data overview
-            with st.expander("Data Overview", expanded=True):
-                st.write(f"**Data shape:** {processed_df.shape}")
-
-                col1, col2, col3 = st.columns(3)
-
-                with col1:
-                    st.metric("Total Records", len(processed_df))
-                    if pd.api.types.is_numeric_dtype(processed_df[price_column]):
-                        st.write(f"**{price_column}:**")
-                        st.write(
-                            f"• Range: €{processed_df[price_column].min():.2f} - €{processed_df[price_column].max():.2f}"
-                        )
-                        st.write(f"• Average: €{processed_df[price_column].mean():.2f}")
-
-                with col2:
-                    equivalent_hours = len(processed_df) * time_interval / 60
-                    st.metric("Equivalent Hours", f"{equivalent_hours:.1f}")
-
-                    if settlement_column and pd.api.types.is_numeric_dtype(
-                        processed_df[settlement_column]
-                    ):
-                        st.write(f"**{settlement_column}:**")
-                        st.write(
-                            f"• Range: €{processed_df[settlement_column].min():.2f} - €{processed_df[settlement_column].max():.2f}"
-                        )
-                        st.write(
-                            f"• Average: €{processed_df[settlement_column].mean():.2f}"
-                        )
-
-                with col3:
-                    missing_values = processed_df.isnull().sum().sum()
-                    st.metric("Missing Values", missing_values)
-
-                st.dataframe(processed_df.head(), use_container_width=True)
+                        if start_date <= end_date:
+                            if data_format == "Long Format":
+                                # Filter by date for long format
+                                date_mask = (
+                                    processed_df["parsed_date"].dt.date >= start_date
+                                ) & (processed_df["parsed_date"].dt.date <= end_date)
+                            else:
+                                # Filter by date for wide format
+                                date_mask = (
+                                    processed_df["parsed_date"].dt.date >= start_date
+                                ) & (processed_df["parsed_date"].dt.date <= end_date)
+                            
+                            original_length = len(processed_df)
+                            processed_df = processed_df[date_mask]
+                            
+                            if len(processed_df) < original_length:
+                                st.success(
+                                    f"Date filter applied: {len(processed_df):,} rows selected from {original_length:,} total rows"
+                                )
+                        else:
+                            st.error("End date must be after start date!")
+                            return
+                    except Exception as e:
+                        st.warning(f"Date filtering failed: {str(e)}")
 
             # Validate numeric columns
             if not pd.api.types.is_numeric_dtype(processed_df[price_column]):
@@ -458,15 +477,15 @@ def main():
                         manual_threshold,
                     )
 
-                # Calculate advanced metrics
+                
                 metrics = calculate_advanced_metrics(
                     result_df, time_interval, power_energy
                 )
 
-                # Display results
+                
                 st.header("Simulation Results")
 
-                # Key metrics (first row)
+                
                 col1, col2, col3 = st.columns(3)
 
                 with col1:
@@ -490,7 +509,7 @@ def main():
                             f"€{metrics['avg_profit_per_operating_period']:.2f}",
                         )
 
-                # Additional metrics (second row)
+              
                 col4, col5 = st.columns(2)
 
                 with col4:
@@ -537,7 +556,7 @@ def main():
                                 f"**Time Resolution:**\nProfit adjusted for {time_interval}-minute intervals ({time_interval/60:.2f}x hourly rate)"
                             )
 
-                    # Add gas generation insights
+                    
                     if (
                         "total_gas_generated_mwh" in metrics
                         and metrics["total_gas_generated_mwh"] > 0
@@ -577,7 +596,7 @@ def main():
                         "Try adjusting the efficiency parameter, certificate price, or threshold value."
                     )
 
-                    # Show basic price chart
+                    
                     fig = go.Figure()
                     fig.add_trace(
                         go.Scatter(
@@ -606,45 +625,45 @@ def main():
                     )
                     st.plotly_chart(fig, use_container_width=True)
 
-                # Add the PDF download button right here inside the if block
+                
                 if operating_hours > 0:
-                    # Create a dictionary with simulation parameters for the PDF report
+                    
                     simulation_params = {
                         'efficiency_parameter': efficiency_parameter,
                         'power_energy': power_energy,
                         'certificates': certificates,
                         'time_interval': time_interval,
                         'threshold_method': 'manual' if threshold_option == "Set Manual Threshold" else 'gas_based',
-                        'manual_threshold': manual_threshold if threshold_option == "Set Manual Threshold" else None
+                        'manual_threshold': manual_threshold if threshold_option == "Set Manual Threshold" else None,
+                        'data_format': data_format
                     }
                 
-                # Generate the PDF report
-                with st.spinner("Generating PDF report..."):
-                    pdf_report = generate_pdf_report(
-                        result_df, 
-                        metrics, 
-                        simulation_params,
-                        price_column,
-                        fig  # Pass the visualization figure
-                    )
                     
-                    # Create a download button for the PDF
-                    st.download_button(
-                        label="Download PDF Report",
-                        data=pdf_report,
-                        file_name=f"electrolyser_report_{datetime.now().strftime('%Y%m%d_%H%M')}.pdf",
-                        mime="application/pdf",
-                        key="pdf_download",
-                        help="Download a PDF report with simulation results",
-                        use_container_width=True
-                    )
+                    with st.spinner("Generating PDF report..."):
+                        pdf_report = generate_pdf_report(
+                            result_df, 
+                            metrics, 
+                            simulation_params,
+                            price_column,
+                            fig  
+                        )
+                        
+                        
+                        st.download_button(
+                            label="Download PDF Report",
+                            data=pdf_report,
+                            file_name=f"electrolyser_report_{datetime.now().strftime('%Y%m%d_%H%M')}.pdf",
+                            mime="application/pdf",
+                            key="pdf_download",
+                            help="Download a PDF report with simulation results",
+                            use_container_width=True
+                        )
 
         except Exception as e:
             st.error(f"Error processing file: {str(e)}")
             st.info(
                 "Please ensure your CSV file is properly formatted with numeric data in the selected columns."
             )
-            # Show the full error traceback for debugging
             import traceback
 
             with st.expander("Full Error Details", expanded=False):
@@ -652,6 +671,20 @@ def main():
 
     else:
         st.info("Upload a CSV file to get started.")
+        
+        
+        with st.expander("Data Format Guide", expanded=False):
+            st.markdown("""
+            **Wide Format:**
+            - Must contain a 'Delivery day' column with dates
+            - Hour columns: 'Hour 1', 'Hour 2', ..., 'Hour 24'
+            - Each row represents one day
+            
+            **Long Format:**
+            - Must contain a 'DeliveryStart' column with datetime values
+            - Each row represents one time period
+            - Columns for price, settlement data, etc.
+            """)
 
 
 if __name__ == "__main__":
