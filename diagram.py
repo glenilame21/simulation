@@ -6,21 +6,23 @@ import plotly.graph_objects as go
 import tempfile
 import os
 
+from strategies import spot
+
 from logic import (
     load_gas_prices,
-    preprocess_with_gas_prices,
-    add_settlement_to_long_format,
-    test_google_sheets_connection,
-    parse_date_column,
-    spot,
+    process_data,
+    parse_date_column
+)
+
+from vizualization import(
     calculate_advanced_metrics,
     create_enhanced_visualization,
     generate_pdf_report
 )
 
-st.set_page_config(page_title="Electrolyser Dashboard", page_icon="⚡", layout="wide")
+st.set_page_config(page_title="Electrolyser Dashboard", layout="wide")
 
-# Initialize global variable for gas prices
+
 if 'gas_prices_df' not in st.session_state:
     st.session_state.gas_prices_df = None
 
@@ -54,7 +56,7 @@ def main():
             "Select your data format:",
             options=["Wide Format", "Long Format"],
             index=0,
-            help="Wide Format: Data with 'Delivery day' column and hourly price columns (Hour 1, Hour 2, etc.)\nLong Format: Data with individual rows for each hour/period"
+            help="Wide Format: Data with 'DeliveryStart' column and hourly price columns (Hour 1, Hour 2, etc.)\nLong Format: Data with individual rows for each hour/period"
         )
 
         # Gas file selection first (before loading)
@@ -86,7 +88,7 @@ def main():
         uploaded_file = st.file_uploader(
             "Upload CSV Data",
             type=["csv"],
-            help="Upload a CSV file. Format depends on your selection above:\n- Wide Format: 'Delivery day' column + hourly columns\n- Long Format: Individual rows for each time period",
+            help="Upload a CSV file. Format depends on your selection above:\n- Wide Format: 'DeliveryStart' column + hourly columns\n- Long Format: Individual rows for each time period",
         )
 
         st.divider()
@@ -153,154 +155,43 @@ def main():
 
     if uploaded_file is not None:
         try:
-            #first load
+            # First load the raw data
             df_raw = pd.read_csv(uploaded_file)
-
-            # Show data format information
-            #not as important
-            #st.info(f"**Selected format:** {data_format}")
-
-            # Check if format selection matches data structure
-            has_delivery_day = "Delivery day" in df_raw.columns
             
-            # because spot and intraday come in wide or long format I added a button so that the processing is done automatically for each case
-            # if the user will select the wrong option after upload it will show the error
-            #they simply have to change the toggle from Wide to Long or from Long to Wide
-            if data_format == "Wide Format" and not has_delivery_day:
-                st.warning("Wide Format selected but no 'Delivery day' column found. You might want to select Long Format instead.")
-            elif data_format == "Long Format" and has_delivery_day:
-                st.warning("Long Format selected but 'Delivery day' column found. You might want to select Wide Format instead.")
-
-            # Process data based on selected format
-            if data_format == "Wide Format":
-                # Determine preprocessing parameters based on threshold option
+            # Process data using the unified function
+            with st.spinner("Processing data..."):
+                # Determine gas source based on threshold option
                 if threshold_option == "Calculate from Gas Price":
-                    with st.spinner(
-                        f"Loading and preprocessing data with {gas_file_option.lower()} gas prices..."
-                    ):
-                        df = preprocess_with_gas_prices(
-                            df_raw, use_manual_threshold=False
-                        )
-
-                        if df.empty:
-                            st.error(
-                                "Data preprocessing failed. Please check the debug information and ensure your data format is correct."
-                            )
-                            return
-
-                        st.success(
-                            "Data preprocessed and merged with gas prices successfully!"
-                        )
-                else: 
-                    with st.spinner("Preprocessing data with manual threshold..."):
-                        df = preprocess_with_gas_prices(
-                            df_raw,
-                            use_manual_threshold=True,
-                            manual_threshold_value=manual_threshold
-                        )
-
-                        if df.empty:
-                            st.error(
-                                "Data preprocessing failed. Please check the debug information and ensure your data format is correct."
-                            )
-                            return
-
-                        st.success(
-                            "Data preprocessed with manual threshold successfully!"
-                        )
+                    gas_source = "api"
+                else:
+                    gas_source = "manual"
                 
+                # Process data with the consolidated function
+                df = process_data(
+                    df_raw,
+                    gas_source=gas_source,
+                    manual_threshold_value=manual_threshold
+                )
+                
+                if not df.empty:
+                    if gas_source == "api":
+                        st.success(f"Data processed and merged with {gas_file_option.lower()} gas prices successfully!")
+                    else:
+                        st.success("Data processed with manual threshold successfully!")
+                else:
+                    st.error("Processing returned empty dataset. Please check your data format.")
+                    return
+                
+            # Determine default column indices for selection
+            if data_format == "Wide Format":
                 price_default_idx = 0
                 settlement_default_idx = 0
-
+                
                 if "Price" in df.columns:
                     price_default_idx = df.columns.tolist().index("Price")
                 if "Settlement" in df.columns:
                     settlement_default_idx = df.columns.tolist().index("Settlement")
-
             else:  # Long Format
-                # Use long format processing
-                df = df_raw.copy()
-                # Check for required column for long format (DeliveryStart)
-                if "DeliveryStart" not in df.columns:
-                    st.error("Long format data must contain a 'DeliveryStart' column. Please check your data format.")
-                    st.info("Expected columns for long format: DeliveryStart, Price (or similar), and optionally settlement data")
-                    return
-
-                # Apply settlement processing based on threshold option
-                if threshold_option == "Calculate from Gas Price":
-                    with st.spinner(f"Processing long format data with {gas_file_option.lower()} gas prices..."):
-                        # Get gas prices from session state
-                        gas_prices_df = st.session_state.gas_prices_df
-                        
-                        if gas_prices_df is None or gas_prices_df.empty:
-                            st.error("Gas prices not loaded. Please refresh the page.")
-                            return
-                        
-                        # Create temporary file for gas prices
-                        temp_dir = tempfile.gettempdir()
-                        temp_gas_file = os.path.join(temp_dir, f"temp_gas_prices_{gas_file_option.lower().replace(' ', '_')}.csv")
-                        
-                        try:
-                            # Prepare gas prices data for the function
-                            gas_df_for_export = gas_prices_df.reset_index()
-                            
-                            # Ensure we have the correct column names
-                            if len(gas_df_for_export.columns) >= 2:
-                                gas_df_for_export.columns = ['date', 'price']
-                            else:
-                                # Handle case where there might be only one column
-                                gas_df_for_export = gas_df_for_export.reset_index()
-                                gas_df_for_export.columns = ['date', 'price']
-                            
-                            # Save to temporary CSV file
-                            gas_df_for_export.to_csv(temp_gas_file, index=False)
-                            
-                            # Use the appropriate gas price file based on selection
-                            if gas_file_option == "Month Ahead":
-                                df = add_settlement_to_long_format(
-                                    df_raw, 
-                                    gas_month_ahead_path=temp_gas_file
-                                )
-                            else:  # Spot
-                                df = add_settlement_to_long_format(
-                                    df_raw, 
-                                    gas_spot_path=temp_gas_file
-                                )
-                            
-                            # Clean up temporary file
-                            try:
-                                os.remove(temp_gas_file)
-                            except:
-                                pass  # Ignore cleanup errors
-                                
-                            st.success(f"Successfully processed long format data with {gas_file_option.lower()} gas prices!")
-                                
-                        except Exception as e:
-                            st.error(f"Error processing gas prices: {str(e)}")
-                            # Fallback to gas threshold
-                            st.warning("Falling back to average gas price as threshold.")
-                            
-                            # Calculate average gas price as fallback
-                            try:
-                                avg_gas_price = gas_prices_df.iloc[:, -1].mean() if not gas_prices_df.empty else 50.0
-                                st.info(f"Using average gas price: €{avg_gas_price:.2f}/MWh")
-                            except:
-                                avg_gas_price = 50.0
-                                st.info(f"Using default gas price: €{avg_gas_price:.2f}/MWh")
-                                
-                            df = add_settlement_to_long_format(
-                                df_raw, 
-                                gas_threshold=avg_gas_price
-                            )
-                else:  # Manual threshold
-                    with st.spinner("Processing long format data with manual threshold..."):
-                        df = add_settlement_to_long_format(
-                            df_raw, 
-                            gas_threshold=manual_threshold
-                        )
-
-                st.success("Long format data processed successfully!")
-
                 # For long format, set default column indices
                 price_keywords = ["price", "electricity", "power", "energy", "spot"]
                 settlement_keywords = ["settlement", "gas", "fuel", "cost"]
@@ -676,7 +567,7 @@ def main():
         with st.expander("Data Format Guide", expanded=False):
             st.markdown("""
             **Wide Format:**
-            - Must contain a 'Delivery day' column with dates
+            - Must contain a 'DeliveryStart' column with dates
             - Hour columns: 'Hour 1', 'Hour 2', ..., 'Hour 24'
             - Each row represents one day
             
