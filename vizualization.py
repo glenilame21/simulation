@@ -150,26 +150,30 @@ def create_enhanced_visualization(df_result, price_col, time_interval_minutes):
     return fig
 
 
-def generate_pdf_report(result_df, metrics, simulation_params, price_col, fig=None):
-    """
-    Generate a PDF report summarizing electrolyser simulation results.
-    
-    Parameters:
-    - result_df: DataFrame containing simulation results
-    - metrics: Dictionary of calculated metrics
-    - simulation_params: Dictionary with simulation parameters
-    - price_col: Column name for price data
-    - fig: Optional Plotly figure to include in report
-    
-    Returns:
-    - PDF file contents as bytes
-    """
+def generate_pdf_report(result_df, metrics, simulation_params, price_col, fig=None, dataset_metadata=None):
+
     buffer = BytesIO()
+    
+    def add_page_elements(canvas, doc):
+        # Save the state of the canvas
+        canvas.saveState()
+    
+        logo_path = "C:/Users/Z_LAME/Desktop/Papers/logo.png"
+        if os.path.exists(logo_path):
+            # Logo positioning: right side with margins
+            logo_width = 3 * inch  # Set your preferred width
+            logo_height = 2.2 * inch  # Maintain aspect ratio as needed
+            x = doc.pagesize[0] - logo_width + 0.5*inch  # Right margin
+            y = doc.pagesize[1] - logo_height + 0.5*inch  # Top margin
+            
+            canvas.drawImage(logo_path, x, y, width=logo_width, height=logo_height, preserveAspectRatio=True)
+        
+        canvas.restoreState()
+
     doc = SimpleDocTemplate(
         buffer,
         pagesize=A4,
         title="Electrolyser Simulation Report",
-        author="Electrolyser Dashboard",
         leftMargin=inch*0.5,
         rightMargin=inch*0.5,
         topMargin=inch*0.75,
@@ -186,6 +190,72 @@ def generate_pdf_report(result_df, metrics, simulation_params, price_col, fig=No
     elements.append(Paragraph(f"Generated on: {datetime.now().strftime('%Y-%m-%d %H:%M')}", normal_style))
     elements.append(Spacer(1, 0.25*inch))
     
+    if dataset_metadata:
+        elements.append(Paragraph("Dataset Information", heading1_style))
+        
+        dataset_data = [
+            ["Property", "Value"],
+        ]
+        
+        # Add dataset name if provided
+        if dataset_metadata.get('dataset_name'):
+            dataset_data.append(["Dataset Name", dataset_metadata['dataset_name']])
+        
+        # Add date range if provided
+        if dataset_metadata.get('date_range_start') and dataset_metadata.get('date_range_end'):
+            start_date = dataset_metadata['date_range_start']
+            end_date = dataset_metadata['date_range_end']
+            
+            # Format dates if they're datetime objects
+            if hasattr(start_date, 'strftime'):
+                start_str = start_date.strftime('%Y-%m-%d')
+            else:
+                start_str = str(start_date)
+                
+            if hasattr(end_date, 'strftime'):
+                end_str = end_date.strftime('%Y-%m-%d')
+            else:
+                end_str = str(end_date)
+                
+            dataset_data.append(["Date Range", f"{start_str} to {end_str}"])
+        
+        # Add time resolution
+        if dataset_metadata.get('time_resolution'):
+            dataset_data.append(["Time Resolution", f"{dataset_metadata['time_resolution']} minutes"])
+        
+        # Add gas price source
+        if dataset_metadata.get('gas_price_source'):
+            gas_source = dataset_metadata['gas_price_source']
+            if gas_source == "Month Ahead":
+                gas_source_text = "Month Ahead Gas Prices"
+            elif gas_source == "Spot":
+                gas_source_text = "Spot Gas Prices"
+            elif gas_source == "Manual":
+                manual_value = dataset_metadata.get('manual_threshold_value', 'N/A')
+                gas_source_text = f"Manual Threshold (€{manual_value}/MWh)"
+            else:
+                gas_source_text = gas_source
+            
+            dataset_data.append(["Gas Price Source", gas_source_text])
+        
+        # Add total data points
+        dataset_data.append(["Total Data Points", f"{len(result_df):,}"])
+        
+        dataset_table = Table(dataset_data, colWidths=[doc.width*0.4, doc.width*0.5])
+        dataset_table.setStyle(TableStyle([
+            ('BACKGROUND', (0, 0), (1, 0), colors.green),
+            ('TEXTCOLOR', (0, 0), (1, 0), colors.white),
+            ('ALIGN', (0, 0), (1, 0), 'CENTER'),
+            ('FONTNAME', (0, 0), (1, 0), 'Helvetica-Bold'),
+            ('BOTTOMPADDING', (0, 0), (1, 0), 12),
+            ('GRID', (0, 0), (-1, -1), 1, colors.lightgrey),
+            ('VALIGN', (0, 0), (-1, -1), 'MIDDLE'),
+        ]))
+        
+        elements.append(dataset_table)
+        elements.append(Spacer(1, 0.25*inch))
+    
+    # Simulation Parameters section
     elements.append(Paragraph("Simulation Parameters", heading1_style))
     
     param_data = [
@@ -217,6 +287,7 @@ def generate_pdf_report(result_df, metrics, simulation_params, price_col, fig=No
     elements.append(param_table)
     elements.append(Spacer(1, 0.25*inch))
     
+    # Key Results section
     elements.append(Paragraph("Key Results", heading1_style))
     
     results_data = [
@@ -225,14 +296,12 @@ def generate_pdf_report(result_df, metrics, simulation_params, price_col, fig=No
         ["Operating Periods", f"{metrics.get('operating_periods', 0):,} out of {metrics.get('total_periods', 0):,}"],
         ["Utilization Rate", f"{metrics.get('utilization_rate', 0):.1f}%"],
         ["Total Energy Consumed", f"{metrics.get('total_energy_consumed_mwh', 0):.1f} MWh"],
-        ["Profit per MWh Consumed", f"€{metrics.get('profit_per_mwh', 0):.2f}"],
     ]
     
     if 'total_gas_generated_mwh' in metrics:
         results_data.extend([
             ["Total Gas Generated", f"{metrics.get('total_gas_generated_mwh', 0):.1f} MWh"],
             ["Gas Generation Rate", f"{metrics.get('gas_generation_rate_mwh_per_hour', 0):.2f} MWh/h"],
-            ["Profit per MWh Gas", f"€{metrics.get('profit_per_mwh_gas', 0):.2f}"],
         ])
     
     results_table = Table(results_data, colWidths=[doc.width*0.4, doc.width*0.4])
@@ -249,6 +318,7 @@ def generate_pdf_report(result_df, metrics, simulation_params, price_col, fig=No
     elements.append(results_table)
     elements.append(Spacer(1, 0.25*inch))
     
+    # Price Analysis section (if available)
     if 'avg_operating_price' in metrics:
         elements.append(Paragraph("Price Analysis", heading2_style))
         
@@ -273,6 +343,7 @@ def generate_pdf_report(result_df, metrics, simulation_params, price_col, fig=No
         elements.append(price_table)
         elements.append(Spacer(1, 0.25*inch))
     
+    # Visualization section (if provided)
     if fig is not None:
         elements.append(Paragraph("Visualization", heading1_style))
         
@@ -309,6 +380,7 @@ def generate_pdf_report(result_df, metrics, simulation_params, price_col, fig=No
             import traceback
             elements.append(Paragraph(f"Error details: {traceback.format_exc()[:200]}...", normal_style))
     
+    # Data Sample section
     elements.append(Paragraph("Data Sample", heading1_style))
 
     if len(result_df) > 10:
@@ -369,7 +441,8 @@ def generate_pdf_report(result_df, metrics, simulation_params, price_col, fig=No
     elements.append(sample_table)
     
     try:
-        doc.build(elements)
+        # This is the key change - use onFirstPage and onLaterPages to add the logo to all pages
+        doc.build(elements, onFirstPage=add_page_elements, onLaterPages=add_page_elements)
         
         pdf = buffer.getvalue()
         buffer.close()
