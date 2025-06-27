@@ -383,12 +383,15 @@ def generate_pdf_report(result_df, metrics, simulation_params, price_col, fig=No
     # Data Sample section
     elements.append(Paragraph("Data Sample", heading1_style))
 
-    if len(result_df) > 10:
-        sample_df = result_df.sample(n=10).reset_index()
-        elements.append(Paragraph("Random sample of 10 data points:", normal_style))
+    if len(result_df) > 100:
+        # Filter for operating periods first, then sample if still too large
+        operating_df = result_df[result_df['operate'] == True]
+        if len(operating_df) > 100:
+            sample_df = operating_df.sample(n=100).reset_index()
+        else:
+            sample_df = operating_df.reset_index()
     else:
-        sample_df = result_df.reset_index()
-        elements.append(Paragraph(f"Complete dataset ({len(result_df)} data points):", normal_style))
+        sample_df = result_df[result_df['operate'] == True].reset_index()
 
     if 'Date' in sample_df.columns:
         try:
