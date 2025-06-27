@@ -8,8 +8,6 @@ import os
 
 from strategies import spot
 
-from intraday import intraday_strategy
-
 from logic import (
     load_gas_prices,
     process_data,
@@ -51,27 +49,6 @@ def main():
     # Sidebar for parameters
     with st.sidebar:
         st.header("Configuration")
-        
-        # Strategy selection
-        st.subheader("Trading Strategy")
-        strategy_option = st.selectbox(
-            "Select Trading Strategy:",
-            options=["Spot Market", "Intraday Trading"],
-            index=0,
-            help="Choose which trading strategy to apply",
-        )
-        
-        # Add price jump parameter if intraday strategy is selected
-        price_jump_percentage = None
-        if strategy_option == "Intraday Trading":
-            price_jump_percentage = st.slider(
-                "Price Jump % (for selling)",
-                min_value=1,
-                max_value=30,
-                value=10,
-                step=1,
-                help="Percentage price increase needed to sell position",
-            )
 
         # Gas file selection first (before loading)
         st.subheader("Gas Price Source")
@@ -167,8 +144,6 @@ def main():
             help="Time interval of your data in minutes",
         )
 
-    # Rest of your code remains the same until the "Run Simulation" button...
-    
     if uploaded_file is not None:
         try:
             # First load the raw data
@@ -359,40 +334,20 @@ def main():
             # Run simulation
             if st.button("Run Simulation", type="primary", use_container_width=True):
                 with st.spinner("Running simulation..."):
-                    if strategy_option == "Spot Market":
-                        result_df, operating_hours, total_profit = spot(
-                            processed_df,
-                            price_column,
-                            settlement_column,
-                            efficiency_parameter,
-                            certificates,
-                            time_interval,
-                            power_energy,
-                            manual_threshold,
-                        )
-                        trading_pnl = 0
-                        electrolyser_profits = 0
-                    else:  # Intraday Trading strategy
-                        result_df, operating_hours, total_profit, trading_pnl, electrolyser_profits = intraday_strategy(
-                            processed_df,
-                            price_column,
-                            settlement_column,
-                            efficiency_parameter,
-                            certificates,
-                            time_interval,
-                            power_energy,
-                            manual_threshold,
-                            price_jump_percentage
-                        )
+                    result_df, operating_hours, total_profit = spot(
+                        processed_df,
+                        price_column,
+                        settlement_column,
+                        efficiency_parameter,
+                        certificates,
+                        time_interval,
+                        power_energy,
+                        manual_threshold,
+                    )
 
                 metrics = calculate_advanced_metrics(
                     result_df, time_interval, power_energy
                 )
-
-                # Add strategy-specific metrics
-                if strategy_option == "Intraday Trading":
-                    metrics['trading_pnl'] = trading_pnl
-                    metrics['electrolyser_profits'] = electrolyser_profits
 
                 st.header("Simulation Results")
 
@@ -419,27 +374,21 @@ def main():
                             f"€{metrics['avg_profit_per_operating_period']:.2f}",
                         )
 
-                # Add strategy-specific displays
-                if strategy_option == "Intraday Trading":
-                    col4, col5 = st.columns(2)
-                    with col4:
-                        st.metric("Trading PnL", f"€{trading_pnl:,.2f}")
-                    with col5:
-                        st.metric("Electrolyser Profits", f"€{electrolyser_profits:,.2f}")
-                else:
-                    col4, col5 = st.columns(2)
-                    with col4:
-                        st.metric("Utilization Rate", f"{metrics['utilization_rate']:.1f}%")
-                    with col5:
-                        if "gas_generation_rate_mwh_per_hour" in metrics:
-                            st.metric(
-                                "Gas Rate",
-                                f"{metrics['gas_generation_rate_mwh_per_hour']:.2f} MWh/h",
-                            )
-                        else:
-                            st.metric(
-                                "Operating Periods", f"{metrics['operating_periods']:,}"
-                            )
+                col4, col5 = st.columns(2)
+
+                with col4:
+                    st.metric("Utilization Rate", f"{metrics['utilization_rate']:.1f}%")
+
+                with col5:
+                    if "gas_generation_rate_mwh_per_hour" in metrics:
+                        st.metric(
+                            "Gas Rate",
+                            f"{metrics['gas_generation_rate_mwh_per_hour']:.2f} MWh/h",
+                        )
+                    else:
+                        st.metric(
+                            "Operating Periods", f"{metrics['operating_periods']:,}"
+                        )
 
                 # Visualization
                 st.header("Analysis Dashboard")
@@ -448,40 +397,6 @@ def main():
                     fig = create_enhanced_visualization(
                         result_df, price_column, time_interval
                     )
-                    
-                    # Add specific traces for intraday strategy
-                    if strategy_option == "Intraday Trading" and 'trade_type' in result_df.columns:
-                        buy_points = result_df[result_df['trade_type'] == 'BUY']
-                        sell_points = result_df[result_df['trade_type'] == 'SELL']
-                        electrolyser_points = result_df[result_df['trade_type'] == 'ELECTROLYSER']
-                        
-                        if len(buy_points) > 0:
-                            fig.add_trace(go.Scatter(
-                                x=buy_points.index,
-                                y=buy_points[price_column],
-                                mode='markers',
-                                marker=dict(color='green', size=10, symbol='circle'),
-                                name='Buy Points'
-                            ))
-                        
-                        if len(sell_points) > 0:
-                            fig.add_trace(go.Scatter(
-                                x=sell_points.index,
-                                y=sell_points[price_column],
-                                mode='markers',
-                                marker=dict(color='red', size=10, symbol='circle'),
-                                name='Sell Points'
-                            ))
-                        
-                        if len(electrolyser_points) > 0:
-                            fig.add_trace(go.Scatter(
-                                x=electrolyser_points.index,
-                                y=electrolyser_points[price_column],
-                                mode='markers',
-                                marker=dict(color='blue', size=10, symbol='star'),
-                                name='Electrolyser Usage'
-                            ))
-                    
                     st.plotly_chart(fig, use_container_width=True)
 
                     # Insights
@@ -490,14 +405,9 @@ def main():
                     insights_col1, insights_col2 = st.columns(2)
 
                     with insights_col1:
-                        if strategy_option == "Intraday Trading":
-                            st.info(
-                                f"**Strategy Performance:**\n- Trading profit: €{trading_pnl:,.2f}\n- Electrolyser profit: €{electrolyser_profits:,.2f}\n- Total energy consumed: {metrics['total_energy_consumed_mwh']:.1f} MWh"
-                            )
-                        else:
-                            st.info(
-                                f"**Strategy Performance:**\n- System operates {metrics['utilization_rate']:.1f}% of the time\n- Average profit of €{metrics['avg_profit_per_operating_period']:.2f} per operating period\n- Total energy consumed: {metrics['total_energy_consumed_mwh']:.1f} MWh"
-                            )
+                        st.info(
+                            f"**Strategy Performance:**\n- System operates {metrics['utilization_rate']:.1f}% of the time\n- Average profit of €{metrics['avg_profit_per_operating_period']:.2f} per operating period\n- Total energy consumed: {metrics['total_energy_consumed_mwh']:.1f} MWh"
+                        )
 
                     with insights_col2:
                         if "avg_operating_price" in metrics:
@@ -510,46 +420,7 @@ def main():
                                 f"**Time Resolution:**\nProfit adjusted for {time_interval}-minute intervals ({time_interval/60:.2f}x hourly rate)"
                             )
 
-                    # Strategy-specific insights
-                    if strategy_option == "Intraday Trading":
-                        st.subheader("Intraday Trading Details")
-                        st.info(
-                            f"""
-                            **Trading Strategy:**
-                            - Buy when price falls below {90}% of threshold
-                            - Sell when price rises by {price_jump_percentage}%
-                            - Send to electrolyser if no selling opportunity
-                            """
-                        )
-                        
-                        # Trade statistics
-                        buy_count = len(result_df[result_df['trade_type'] == 'BUY'])
-                        sell_count = len(result_df[result_df['trade_type'] == 'SELL'])
-                        electrolyser_count = len(result_df[result_df['trade_type'] == 'ELECTROLYSER'])
-                        
-                        trade_stats_col1, trade_stats_col2 = st.columns(2)
-                        with trade_stats_col1:
-                            st.success(
-                                f"""
-                                **Trade Counts:**
-                                - Buy positions: {buy_count}
-                                - Sell positions: {sell_count}
-                                - Electrolyser use: {electrolyser_count}
-                                """
-                            )
-                        
-                        with trade_stats_col2:
-                            success_rate = sell_count / buy_count * 100 if buy_count > 0 else 0
-                            st.success(
-                                f"""
-                                **Performance Metrics:**
-                                - Trading success rate: {success_rate:.1f}%
-                                - Avg. trading profit: €{trading_pnl/sell_count:.2f} per trade (if sold)
-                                - Avg. electrolyser profit: €{electrolyser_profits/electrolyser_count:.2f} (if used)
-                                """
-                            )
-                    
-                    elif (
+                    if (
                         "total_gas_generated_mwh" in metrics
                         and metrics["total_gas_generated_mwh"] > 0
                     ):
@@ -617,7 +488,6 @@ def main():
 
                 if operating_hours > 0:
                     simulation_params = {
-                        'strategy': strategy_option,
                         'efficiency_parameter': efficiency_parameter,
                         'power_energy': power_energy,
                         'certificates': certificates,
@@ -626,10 +496,6 @@ def main():
                         'manual_threshold': manual_threshold if threshold_option == "Set Manual Threshold" else None,
                         'data_format': 'auto_detected'  # Since format is now auto-detected
                     }
-                    
-                    # Add strategy-specific parameters
-                    if strategy_option == "Intraday Trading":
-                        simulation_params['price_jump_percentage'] = price_jump_percentage
 
                     # Collect dataset metadata
                     dataset_metadata = {
