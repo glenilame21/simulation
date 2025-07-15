@@ -8,6 +8,9 @@ import requests
 import streamlit as st
 
 def load_gas_prices(gas_file_option="Month Ahead"):
+    # by default the month ahead gas prices are loaded.
+    # if you want to change the source you will need to create a google spreadsheet and insert the data.
+    # You can viuew the url on how the format is expeted to be, just remove the /export?format=csv to view the url in a browser but make sure these parameters stay here to make the request to the correct url
     global gas_prices_df
     if gas_file_option == "Month Ahead":
             gas_url = "https://docs.google.com/spreadsheets/d/1scfhBGJNj1s7P2jJQseeR8zlaN26Dyekpm8gbE3pYzY/export?format=csv"
@@ -181,29 +184,7 @@ def parse_date_column(df, date_col):
 
 def process_data(df, gas_source="api", gas_month_ahead_path=None, gas_spot_path=None, 
                 manual_threshold_value=None):
-    """
-    Comprehensive data processing function that handles both wide and long format data,
-    integrates gas settlement prices, and returns properly formatted data.
-    
-    Parameters:
-    -----------
-    df : pandas.DataFrame
-        Input dataframe containing electricity price data
-    gas_source : str, optional
-        Source of gas pricing data: "api" (use global gas_prices_df), "files" (use CSV files), 
-        or "manual" (use fixed threshold)
-    gas_month_ahead_path : str, optional
-        Path to month ahead gas prices CSV file
-    gas_spot_path : str, optional
-        Path to spot gas prices CSV file
-    manual_threshold_value : float, optional
-        Manual threshold value to use for all settlement prices
-        
-    Returns:
-    --------
-    pandas.DataFrame
-        Processed dataframe with settlement prices included
-    """    
+     
     # Make a copy of the input dataframe to avoid modifying the original
     processed_df = df.copy()
     
